@@ -493,7 +493,7 @@ class ParallelContext(metaclass=SingletonMeta):
             if "weight" not in parallel_config:
                 parallel_config._add_item("weight", dict(size=1, overlap=False, memory_pool=False))
             if "expert" not in parallel_config:
-                parallel_config._add_item("expert", dict(size=1))
+                parallel_config._add_item("expert", dict(size=-1))
 
             # get value from config
             self._set_parallel_size_from_config(parallel_config, "weight", "weight_parallel_size")
@@ -508,11 +508,6 @@ class ParallelContext(metaclass=SingletonMeta):
         self.data_parallel_size = max(1, self.world_size // self.pipeline_parallel_size // self.sequence_parallel_size)
         self.weight_data_parallel_size = max(
             1, self.world_size // self.pipeline_parallel_size // self.weight_parallel_size
-        )
-        # TODO for moe with isp, we have edp = ws/pp/ewp/ep
-        self.expert_data_parallel_size = max(
-            1,
-            self.world_size // self.pipeline_parallel_size // self.sequence_parallel_size // self.expert_parallel_size,
         )
         if isinstance(parallel_config["tensor"], dict) and parallel_config["tensor"]["mode"] == "isp":
             if self.zero1_parallel_size == -1:
@@ -552,6 +547,17 @@ class ParallelContext(metaclass=SingletonMeta):
             self.data_parallel_size % self.config.model.get("num_experts", 1) == 0
             or self.config.model.get("num_experts", 1) % self.data_parallel_size == 0
         ), "can not place the experts evenly"
+
+        # by default, expert_parallel_size equals to data_parallel_size, but if the number of experts is smaller
+        # than data_parallel_size, set expert_parallel_size to be the number of experts to make sure each device
+        # has one expert.
+        if self.expert_parallel_size == -1:
+            self.expert_parallel_size = min(self.data_parallel_size, self.config.model.get("num_experts", 1))
+        # TODO for moe with isp, we have edp = ws/pp/ewp/ep
+        self.expert_data_parallel_size = max(
+            1,
+            self.world_size // self.pipeline_parallel_size // self.sequence_parallel_size // self.expert_parallel_size,
+        )
 
         self.check_sanity()
 
