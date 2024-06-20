@@ -47,7 +47,8 @@ def decoupled_grad_func(input, grad_output, module, communicator):
             grad_bias, async_op=True, module=module, is_bias=True
         )
         return [module.weight, module.bias]
-    return [module.weight,]
+    return [module.weight, ]
+
 
 # adpated from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/fused_dense.py
 class SPFusedDenseFunc(torch.autograd.Function):
@@ -259,14 +260,15 @@ class WPFusedDenseFunc(torch.autograd.Function):
             if use_zeropp:
                 grad_weight = None
                 grad_bias = None
-                ZeroppManager.put(x.reshape(batch_dim, x.shape[-1]), grad_output, module, communicator, decoupled_grad_func)
+                ZeroppManager.put(
+                    x.reshape(batch_dim, x.shape[-1]), grad_output, module, communicator, decoupled_grad_func
+                )
             else:
                 grad_weight, grad_bias = linear_backward_op(
                     x.reshape(batch_dim, x.shape[-1]),
                     grad_output,
                     ctx.needs_input_grad[2],
                 )
-
                 grad_weight, grad_weight_sync = communicator.grad_hook(
                     grad_weight, async_op=True, module=module, is_bias=False
                 )

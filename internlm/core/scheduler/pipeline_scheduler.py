@@ -1420,8 +1420,6 @@ class InterleavedPipelineScheduler(PipelineScheduler):
             return output, label, accum_loss
 
 
-
-
 class ZeroPPScheduler(PipelineScheduler):
     """
     ZeroPP Pipeline Scheduler.
@@ -1456,7 +1454,8 @@ class ZeroPPScheduler(PipelineScheduler):
                 If set to `True`, communication will be reduced over pipeline when using 1D tensor parallelization.
             scheduler_hooks (List[SchedulerHook], optional): List of scheduler hooks. Default is None.
             communication_overlap (bool, optional): Whether to enable communication overlap. Default is False.
-            unit_schedule_size: (int, optional): Unit size if using interleaved GPipe schedule. Default is None and interleaved 1F1B schedule is used.
+            unit_schedule_size: (int, optional):
+                Unit size if using interleaved GPipe schedule. Default is None and interleaved 1F1B schedule is used.
         """
         assert (
             isinstance(num_chunks, int) and num_chunks > 0
@@ -1506,9 +1505,10 @@ class ZeroPPScheduler(PipelineScheduler):
             self._forward_backward_step = self._forward_backward_step_1f1b
             self._get_current_microbatch_id = self._get_chunk_by_microbatch_1f1b
             self._get_chunk_by_microbatch = self._get_chunk_by_microbatch_1f1b
-        
+
         self._cur_unit_schedule_size = self._unit_schedule_size
-        if hasattr(gpc.config.parallel.pipeline, "decouple_grad") and gpc.config.parallel.pipeline.decouple_grad is True:
+        if hasattr(gpc.config.parallel.pipeline, "decouple_grad") \
+                and gpc.config.parallel.pipeline.decouple_grad is True:
             self.decouple_grad = True
         else:
             self.decouple_grad = False
@@ -1536,7 +1536,7 @@ class ZeroPPScheduler(PipelineScheduler):
         self._input_obj_shapes = [self.tensor_shape for _ in range(self._num_chunks)]
         self._output_obj_shapes = [None for _ in range(self._num_chunks)]
         self._send_tensor_shape_flags = [self.tensor_shape is None for _ in range(self._num_chunks)]
-    
+
     def _clear_state_unit(self) -> None:
         self._input_objs = [[] for _ in range(self._num_chunks)]
         self._input_objs_for_backward = [[] for _ in range(self._num_chunks)]
@@ -1579,12 +1579,12 @@ class ZeroPPScheduler(PipelineScheduler):
             Union[:class:`torch.Tensor`, List[:class:`torch.Tensor`]]: output or the loss value of the current
                 pipeline stage.
         """
-        
-            
         gpc.set_virtual_pipeline_parallel_rank(chunk_id)
 
-        if gpc.is_pipeline_first_stage() and (len(self._input_objs[chunk_id]) + len(self._input_objs_for_backward[chunk_id])) == len(self._output_objs[chunk_id]):
-            self._input_objs[chunk_id].append(None)
+        if gpc.is_pipeline_first_stage():
+            if (len(self._input_objs[chunk_id]) + len(self._input_objs_for_backward[chunk_id])) \
+                    == len(self._output_objs[chunk_id]):
+                self._input_objs[chunk_id].append(None)
 
         input_obj = self._input_objs[chunk_id].pop(0)
         self._input_objs_for_backward[chunk_id].append(input_obj)
@@ -1648,7 +1648,6 @@ class ZeroPPScheduler(PipelineScheduler):
         Returns:
             Union[:class:`torch.Tensor`, List[:class:`torch.Tensor`]]: input tensor gradient.
         """
-        
         gpc.set_virtual_pipeline_parallel_rank(chunk_id)
 
         if gpc.is_pipeline_last_stage() and len(self._output_obj_grads[chunk_id]) == 0:
@@ -1800,13 +1799,11 @@ class ZeroPPScheduler(PipelineScheduler):
 
             self._input_objs[next_forward_chunk_id].append(input_obj)
 
-
     def pop_decoupled_grads(self, engine):
         params = ZeroppManager.pop()
         for param in params:
             engine.optimizer._wait_reduce_scatter_and_accumulate_grads(param, skip_decoupled_grad_accum=False)
         self._call_hooks("after_backward", None)
-
 
     def _run_1f1b_loop_with_overlap(
         self,
@@ -1889,10 +1886,9 @@ class ZeroPPScheduler(PipelineScheduler):
             if gpc.is_pipeline_first_stage():
                 input_obj_grad = None
 
-            #next_backward_chunk_id = self._get_chunk_by_microbatch(backward_microstep_id + 1, backward=True)
-
             if gpc.is_pipeline_last_stage(ignore_virtual=True):
-                next_backward_chunk_id = self._get_chunk_by_microbatch(backward_microstep_id - (self._pp_size - 1), backward=True)
+                next_backward_chunk_id = \
+                    self._get_chunk_by_microbatch(backward_microstep_id - (self._pp_size - 1), backward=True)
                 next_backward_chunk_id -= 1
             else:
                 next_backward_chunk_id = self._get_chunk_by_microbatch(backward_microstep_id + 1, backward=True)
@@ -1903,7 +1899,7 @@ class ZeroPPScheduler(PipelineScheduler):
                     output_obj_shape = None
                 else:
                     output_obj_shape = self._output_obj_shapes[next_backward_chunk_id]
-        
+
             backward_async_communicator = comm.AsynCommunicator(
                 input_obj_grad,
                 output_obj_shape,
@@ -1915,11 +1911,11 @@ class ZeroPPScheduler(PipelineScheduler):
 
             if self.decouple_grad:
                 if backward_chunk_id == self._num_chunks - 1:
-                    if backward_microstep_id > self._pp_rank*2:
+                    if backward_microstep_id > self._pp_rank * 2:
                         self.pop_decoupled_grads(engine)
 
                     if backward_microstep_id == self._cur_unit_schedule_size - 1:
-                        for _ in range((self._pp_size - self._pp_rank - 1 )*2):
+                        for _ in range((self._pp_size - self._pp_rank - 1) * 2):
                             if not ZeroppManager.empty():
                                 self.pop_decoupled_grads(engine)
                 else:
@@ -1956,15 +1952,12 @@ class ZeroPPScheduler(PipelineScheduler):
             num_microsteps (int): The total number of microsteps.
             num_1f1b_micropairs (int): The number of 1F1B micro-pairs.
         """
-        #if gpc.get_local_rank(ParallelMode.WEIGHT) == 0:
-        #    logger.info(f"pp_rank: {gpc.get_local_rank(ParallelMode.PIPELINE)}, _run_cooldown_loop")
         for k in range(num_1f1b_micropairs, num_microsteps):
             chunk_id = self._get_chunk_by_microbatch(k, backward=True)
 
             input_obj_grad = self._backward_step(engine, chunk_id, k)
             ZeroppManager.flush()
 
-            #next_backward_chunk_id = self._get_chunk_by_microbatch(k + 1, backward=True)
             if gpc.is_pipeline_last_stage(ignore_virtual=True):
                 next_backward_chunk_id = self._get_chunk_by_microbatch(k - (self._pp_size - 1), backward=True)
                 next_backward_chunk_id -= 1
@@ -1987,19 +1980,15 @@ class ZeroPPScheduler(PipelineScheduler):
                 forward=False,
             )
             backward_async_communicator.start()
-            
             self.pop_decoupled_grads(engine)
-
             output_obj_grad = backward_async_communicator.wait_and_receive()
             if backward_async_communicator.need_receive:
                 self._output_obj_grads[next_backward_chunk_id].append(output_obj_grad)
             else:
                 self._output_obj_grads[next_backward_chunk_id].append(None)
 
-
         while not ZeroppManager.empty():
             self.pop_decoupled_grads(engine)
-
 
     def _forward_only_step(self, engine: Engine):
         num_microsteps = self.num_microbatches * self._num_chunks
@@ -2013,13 +2002,10 @@ class ZeroPPScheduler(PipelineScheduler):
             forward_only=True,
         )
 
-
     def _unit_schedule_step(self, engine: Engine, unit_schedule_size):
         gpc.set_virtual_pipeline_parallel_rank(0)
         self._cur_unit_schedule_size = unit_schedule_size
         # Compute number of warmup and remaining microbatches.
-        
-
         unit_num_microsteps = unit_schedule_size * self._num_chunks
 
         # Run all forward passes and then all backward passes if number of
@@ -2028,14 +2014,11 @@ class ZeroPPScheduler(PipelineScheduler):
         # all workers, followed by more microbatches after depending on
         # stage ID (more forward passes for earlier stages, later stages can
         # immediately start with 1F1B).
-        
-
         num_warmup_steps = (self._pp_size - self._pp_rank - 1) * 2
         num_warmup_steps += (self._num_chunks - 1) * unit_schedule_size
         num_warmup_steps = min(num_warmup_steps, unit_num_microsteps)
         num_1f1b_micropairs = unit_num_microsteps - num_warmup_steps
-
-        all_warmup_microsteps = (num_1f1b_micropairs == 0)
+        all_warmup_microsteps = num_1f1b_micropairs == 0
 
         # We usually need to prepare an extra backward data for the 1F1B stage when the WarmUp stage ends,
         # because the 1F1B stage typically performs one forward and backward pass together,
@@ -2044,9 +2027,6 @@ class ZeroPPScheduler(PipelineScheduler):
             all_warmup_microsteps  # Only warmup microsteps
             or gpc.is_pipeline_last_stage(ignore_virtual=True)  # The rank is the last pipeline stage
         )
-
-        #if gpc.get_local_rank(ParallelMode.WEIGHT) == 0:
-        #    logger.info(f"pp_rank: {gpc.get_local_rank(ParallelMode.PIPELINE)}, receive_extra_backward: {receive_extra_backward}, num_warmup_steps: {num_warmup_steps}")
 
         # 1. Warmup
         self._run_warmup_loop(
@@ -2068,9 +2048,7 @@ class ZeroPPScheduler(PipelineScheduler):
         self._run_cooldown_loop(engine, unit_num_microsteps, num_1f1b_micropairs=num_1f1b_micropairs)
         self._clear_state_unit()
 
-    
     def _forward_backward_step_gpipe(self, engine: Engine):
-
         last_unit_schedule_size = self.num_microbatches % self._unit_schedule_size
         num_unit_schedules = self.num_microbatches // self._unit_schedule_size
         if last_unit_schedule_size > 0:
@@ -2081,7 +2059,6 @@ class ZeroPPScheduler(PipelineScheduler):
         for i in range(num_unit_schedules - 1):
             self._unit_schedule_step(engine, self._unit_schedule_size)
         self._unit_schedule_step(engine, last_unit_schedule_size)
-    
 
     def _forward_backward_step_1f1b(self, engine: Engine):
         # Compute number of warmup and remaining microbatches.
@@ -2130,7 +2107,6 @@ class ZeroPPScheduler(PipelineScheduler):
         # 3. Cooldown
         self._run_cooldown_loop(engine, num_microsteps, num_1f1b_micropairs=num_1f1b_micropairs)
 
-        
     @llm_timeout(func_name="zeropp_forward_backward_step")
     def forward_backward_step(self, engine, data_iter, forward_only=False, return_loss=True, return_output_label=True):
         """Run interleaved 1F1B schedule (model split into model chunks), with
