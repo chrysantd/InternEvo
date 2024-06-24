@@ -97,8 +97,8 @@ def initialize_trainer(
             communication_overlap = gpc.config.parallel["pipeline"].get("interleaved_overlap", False)
             use_zeropp = hasattr(gpc.config.parallel.pipeline, "use_zeropp") and gpc.config.parallel.pipeline.use_zeropp
             if use_zeropp:
-                unit_schedule_size = gpc.config.data["unit_schedule_size"] if(hasattr(gpc.config, "data") and hasattr(gpc.config.data, "unit_schedule_size")) \
-                    else None
+                unit_schedule_size = gpc.config.data["unit_schedule_size"] \
+                    if(hasattr(gpc.config, "data") and hasattr(gpc.config.data, "unit_schedule_size")) else None
                 scheduler = ZeroPPScheduler(
                     data_process_func=data_fn,
                     num_microbatches=gpc.config.NUM_MICRO_BATCHES,
