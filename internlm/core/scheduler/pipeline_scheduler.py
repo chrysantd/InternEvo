@@ -1822,6 +1822,7 @@ class ZeroPPScheduler(PipelineScheduler):
 
         forward_async_communicator = None
         backward_async_communicator = None
+        next_forward_chunk_id = next_backward_chunk_id = 0
 
         # Run 1F1B in steady state.
         for k in range(num_1f1b_micropairs):
