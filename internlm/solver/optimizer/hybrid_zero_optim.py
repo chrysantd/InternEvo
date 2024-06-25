@@ -417,8 +417,9 @@ class HybridZeroOptimizer(BaseOptimizer):
 
         bucket.reset_by_rank(reduce_rank)
 
-    def _wait_reduce_scatter_and_accumulate_grads(self, param, reduce_rank: Optional[int] = None,
-                                                  skip_decoupled_grad_accum=True):
+    def _wait_reduce_scatter_and_accumulate_grads(
+        self, param, reduce_rank: Optional[int] = None, skip_decoupled_grad_accum=True
+    ):
         param_size = param.numel()
 
         group_id = getattr(param, "group_id")

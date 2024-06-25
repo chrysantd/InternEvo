@@ -33,21 +33,19 @@ custom_bwd = internlm_accelerator.return_custom_bwd()
 custom_fwd = internlm_accelerator.return_custom_fwd()
 
 
-def decoupled_grad_func(input, grad_output, module, communicator):
+def decoupled_grad_func(x, grad_output, module, communicator):
     grad_weight, grad_bias = linear_backward_op(
-        input,
+        x,
         grad_output,
         module.bias is not None and module.bias.requires_grad,
     )
-    communicator.grad_hook(
-        grad_weight, async_op=True, module=module, is_bias=False
-    )
+    communicator.grad_hook(grad_weight, async_op=True, module=module, is_bias=False)
     if grad_bias is not None:
-        communicator.grad_hook(
-            grad_bias, async_op=True, module=module, is_bias=True
-        )
+        communicator.grad_hook(grad_bias, async_op=True, module=module, is_bias=True)
         return [module.weight, module.bias]
-    return [module.weight, ]
+    return [
+        module.weight,
+    ]
 
 
 # adpated from https://github.com/Dao-AILab/flash-attention/blob/main/flash_attn/ops/fused_dense.py

@@ -1507,8 +1507,10 @@ class ZeroPPScheduler(PipelineScheduler):
             self._get_chunk_by_microbatch = self._get_chunk_by_microbatch_1f1b
 
         self._cur_unit_schedule_size = self._unit_schedule_size
-        if hasattr(gpc.config.parallel.pipeline, "decouple_grad") \
-                and gpc.config.parallel.pipeline.decouple_grad is True:
+        if (
+            hasattr(gpc.config.parallel.pipeline, "decouple_grad")
+            and gpc.config.parallel.pipeline.decouple_grad is True
+        ):
             self.decouple_grad = True
         else:
             self.decouple_grad = False
@@ -1582,8 +1584,9 @@ class ZeroPPScheduler(PipelineScheduler):
         gpc.set_virtual_pipeline_parallel_rank(chunk_id)
 
         if gpc.is_pipeline_first_stage():
-            if (len(self._input_objs[chunk_id]) + len(self._input_objs_for_backward[chunk_id])) \
-                    == len(self._output_objs[chunk_id]):
+            if (len(self._input_objs[chunk_id]) + len(self._input_objs_for_backward[chunk_id])) == len(
+                self._output_objs[chunk_id]
+            ):
                 self._input_objs[chunk_id].append(None)
 
         input_obj = self._input_objs[chunk_id].pop(0)
@@ -1888,8 +1891,9 @@ class ZeroPPScheduler(PipelineScheduler):
                 input_obj_grad = None
 
             if gpc.is_pipeline_last_stage(ignore_virtual=True):
-                next_backward_chunk_id = \
-                    self._get_chunk_by_microbatch(backward_microstep_id - (self._pp_size - 1), backward=True)
+                next_backward_chunk_id = self._get_chunk_by_microbatch(
+                    backward_microstep_id - (self._pp_size - 1), backward=True
+                )
                 next_backward_chunk_id -= 1
             else:
                 next_backward_chunk_id = self._get_chunk_by_microbatch(backward_microstep_id + 1, backward=True)
@@ -2057,7 +2061,7 @@ class ZeroPPScheduler(PipelineScheduler):
         else:
             last_unit_schedule_size = self._unit_schedule_size
 
-        for i in range(num_unit_schedules - 1):
+        for _ in range(num_unit_schedules - 1):
             self._unit_schedule_step(engine, self._unit_schedule_size)
         self._unit_schedule_step(engine, last_unit_schedule_size)
 

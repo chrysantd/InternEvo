@@ -2,6 +2,10 @@ import queue
 
 
 class ZeroppManager:
+    """
+    ZeroppManager is used to manage ZeroPP parameters gathering and gradient calculation.
+    """
+
     cache = []
     cached_wp_params = {}
     grad_queue = queue.LifoQueue()
