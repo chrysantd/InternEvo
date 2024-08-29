@@ -444,7 +444,7 @@ class ParallelContext(metaclass=SingletonMeta):
 
         # for expert
         eps = self.expert_parallel_size
-        esps = self.expert_sequence_parallel_size
+        etps = self.expert_tensor_parallel_size
         ewps = self.expert_weight_parallel_size
         edps = self.expert_data_parallel_size
         if (
@@ -457,10 +457,10 @@ class ParallelContext(metaclass=SingletonMeta):
                 f"weight parallel size ({ewps}) * pipeline parallel size ({pps})"
             )
         else:
-            assert ws == eps * edps * esps * pps, (
+            assert ws == eps * edps * etps * pps, (
                 f"Expected the world size {ws} to be equal to expert parallel "
-                f"size ({eps}) * expert data parallel size ({edps}) * expert sequence "
-                f"parallel size ({esps}) * pipeline parallel size ({pps})"
+                f"size ({eps}) * expert data parallel size ({edps}) * expert tensor "
+                f"parallel size ({etps}) * pipeline parallel size ({pps})"
             )
 
         assert self.zero1_parallel_size > 0
@@ -508,7 +508,7 @@ class ParallelContext(metaclass=SingletonMeta):
             if "weight" not in parallel_config:
                 parallel_config._add_item("weight", dict(size=1, overlap=False, memory_pool=False))
             if "expert" not in parallel_config:
-                parallel_config._add_item("expert", dict(size=-1), no_tp=False)
+                parallel_config._add_item("expert", dict(size=-1, no_tp=False))
             if "expert_weight" not in parallel_config:
                 parallel_config._add_item("expert_weight", dict(size=1, overlap=False, memory_pool=False))
 
@@ -517,6 +517,8 @@ class ParallelContext(metaclass=SingletonMeta):
             self._set_parallel_size_from_config(parallel_config, "tensor", "tensor_parallel_size")
             self._set_parallel_size_from_config(parallel_config, "pipeline", "pipeline_parallel_size")
             self._set_parallel_size_from_config(parallel_config, "zero1", "zero1_parallel_size")
+            self._set_parallel_size_from_config(parallel_config, "expert", "expert_parallel_size")
+            self._set_parallel_size_from_config(parallel_config, "expert_weight", "expert_weight_parallel_size")
 
         # the user should not set the data parallel size manually
         # instead, it should be calculated based on other parallel config
@@ -535,9 +537,9 @@ class ParallelContext(metaclass=SingletonMeta):
             self.config.model.get("num_experts", 1) % self.expert_parallel_size == 0
         ), "can not place the experts evenly"
         if getattr(parallel_config.expert, "no_tp", False):
-            self.expert_sequence_parallel_size = 1
+            self.expert_tensor_parallel_size = 1
         else:
-            self.expert_sequence_parallel_size = self.sequence_parallel_size
+            self.expert_tensor_parallel_size = self.tensor_parallel_size
         if (
             isinstance(parallel_config["tensor"], dict)
             and parallel_config["tensor"]["mode"] == TensorParallelMode.isp.name
@@ -556,7 +558,7 @@ class ParallelContext(metaclass=SingletonMeta):
                 1,
                 self.world_size
                 // self.pipeline_parallel_size
-                // self.expert_sequence_parallel_size
+                // self.expert_tensor_parallel_size
                 // self.expert_parallel_size,
             )
         if (
@@ -621,7 +623,7 @@ class ParallelContext(metaclass=SingletonMeta):
             self.zero1_parallel_size,
             self.nettest_parallel_size,
             self.expert_parallel_size,
-            self.expert_sequence_parallel_size,
+            self.expert_tensor_parallel_size,
             self.expert_weight_parallel_size,
             self.expert_data_parallel_size,
         ]
