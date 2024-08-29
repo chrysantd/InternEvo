@@ -97,6 +97,9 @@ class ProcessGroupInitializer(ABC):
         zero1_parallel_size: int,
         nettest_parallel_size: int,
         expert_parallel_size: int,
+        expert_sequence_parallel_size: int,
+        expert_weight_parallel_size: int,
+        expert_data_parallel_size: int,
     ):
         self.rank = rank
         self.world_size = world_size
@@ -109,6 +112,9 @@ class ProcessGroupInitializer(ABC):
         self.zero1_parallel_size = zero1_parallel_size
         self.nettest_parallel_size = nettest_parallel_size
         self.expert_parallel_size = expert_parallel_size
+        self.expert_sequence_parallel_size = expert_sequence_parallel_size
+        self.expert_weight_parallel_size = expert_weight_parallel_size
+        self.expert_data_parallel_size = expert_data_parallel_size
 
         assert sequence_parallel_size == tensor_parallel_size
         super().__init__()
@@ -491,7 +497,10 @@ class Initializer_Expert_Data(ProcessGroupInitializer):
         super().__init__(*args, **kwargs)
 
         self.ranks_num_per_pp = self.world_size // self.pipeline_parallel_size
-        assert self.data_parallel_size % self.expert_parallel_size == 0
+        self.real_data_parallel_size = (
+            self.data_parallel_size * self.tensor_parallel_size // self.expert_sequence_parallel_size
+        )
+        assert self.real_data_parallel_size % self.expert_parallel_size == 0
 
     def _get_expert_parallel_ranks(self):
         """
@@ -504,11 +513,11 @@ class Initializer_Expert_Data(ProcessGroupInitializer):
         """
         data_parallel_groups = []
         for i in range(self.pipeline_parallel_size):
-            for j in range(self.sequence_parallel_size):
+            for j in range(self.expert_sequence_parallel_size):
                 data_parallel_groups.append(
                     [
-                        i * self.ranks_num_per_pp + j + k * self.sequence_parallel_size
-                        for k in range(self.data_parallel_size)
+                        i * self.ranks_num_per_pp + j + k * self.expert_sequence_parallel_size
+                        for k in range(self.real_data_parallel_size)
                     ]
                 )
 
@@ -517,7 +526,7 @@ class Initializer_Expert_Data(ProcessGroupInitializer):
         for dp_ranks in data_parallel_groups:
             # partition of expert parallel group, e.g. [0,2], [4,6]
             part_ep_group = []
-            for i in range(0, self.data_parallel_size, self.expert_parallel_size):
+            for i in range(0, self.real_data_parallel_size, self.expert_parallel_size):
                 part_ep_group.append(dp_ranks[i : i + self.expert_parallel_size])
             expert_parallel_groups.extend(part_ep_group)
 

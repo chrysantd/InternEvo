@@ -33,6 +33,8 @@ IS_TENSOR_ZERO_PARALLEL = "is_tensor_zero_parallel"
 IS_WEIGHT_ZERO_PARALLEL = "is_weight_zero_parallel"
 # for moe
 IS_TENSOR_EXPERT_DATA_PARALLEL = "is_tensor_expert_data_parallel"
+IS_WEIGHT_EXPERT_DATA_PARALLEL = "is_weight_expert_data_parallel"
+IS_REPLICA_EXPERT_DATA_PARALLEL = "is_replica_expert_data_parallel"
 
 logger = get_logger(__file__)
 internlm_accelerator = get_accelerator()
@@ -440,6 +442,27 @@ class ParallelContext(metaclass=SingletonMeta):
             f"({pps}) * weight parallel size ({wps})"
         )
 
+        # for expert
+        eps = self.expert_parallel_size
+        esps = self.expert_sequence_parallel_size
+        ewps = self.expert_weight_parallel_size
+        edps = self.expert_data_parallel_size
+        if (
+            isinstance(self.config.parallel["tensor"], dict)
+            and self.config.parallel["tensor"]["mode"] == TensorParallelMode.isp.name
+        ):
+            assert ws == eps * edps * ewps * pps, (
+                f"Expected the world size {ws} to be equal to expert parallel "
+                f"size ({eps}) * expert data parallel size ({edps}) * expert "
+                f"weight parallel size ({ewps}) * pipeline parallel size ({pps})"
+            )
+        else:
+            assert ws == eps * edps * esps * pps, (
+                f"Expected the world size {ws} to be equal to expert parallel "
+                f"size ({eps}) * expert data parallel size ({edps}) * expert sequence "
+                f"parallel size ({esps}) * pipeline parallel size ({pps})"
+            )
+
         assert self.zero1_parallel_size > 0
 
         # check for fsdp:
@@ -484,6 +507,10 @@ class ParallelContext(metaclass=SingletonMeta):
                 parallel_config._add_item("tensor", dict(size=1, mode=TensorParallelMode.mtp.name))
             if "weight" not in parallel_config:
                 parallel_config._add_item("weight", dict(size=1, overlap=False, memory_pool=False))
+            if "expert" not in parallel_config:
+                parallel_config._add_item("expert", dict(size=-1), no_tp=False)
+            if "expert_weight" not in parallel_config:
+                parallel_config._add_item("expert_weight", dict(size=1, overlap=False, memory_pool=False))
 
             # get value from config
             self._set_parallel_size_from_config(parallel_config, "weight", "weight_parallel_size")
@@ -498,6 +525,40 @@ class ParallelContext(metaclass=SingletonMeta):
         self.weight_data_parallel_size = max(
             1, self.world_size // self.pipeline_parallel_size // self.weight_parallel_size
         )
+
+        # by default, expert_parallel_size equals to data_parallel_size, but if the number of experts is smaller
+        # than data_parallel_size, set expert_parallel_size to be the number of experts to make sure each device
+        # has one expert.
+        if self.expert_parallel_size == -1:
+            self.expert_parallel_size = min(self.data_parallel_size, self.config.model.get("num_experts", 1))
+        assert (
+            self.config.model.get("num_experts", 1) % self.expert_parallel_size == 0
+        ), "can not place the experts evenly"
+        if getattr(parallel_config.expert, "no_tp", False):
+            self.expert_sequence_parallel_size = 1
+        else:
+            self.expert_sequence_parallel_size = self.sequence_parallel_size
+        if (
+            isinstance(parallel_config["tensor"], dict)
+            and parallel_config["tensor"]["mode"] == TensorParallelMode.isp.name
+        ):
+            # using isp, consider ewp
+            self.expert_data_parallel_size = max(
+                1,
+                self.world_size
+                // self.pipeline_parallel_size
+                // self.expert_weight_parallel_size
+                // self.expert_parallel_size,
+            )
+        else:
+            # using tp, no wp, ep*edp = dp
+            self.expert_data_parallel_size = max(
+                1,
+                self.world_size
+                // self.pipeline_parallel_size
+                // self.expert_sequence_parallel_size
+                // self.expert_parallel_size,
+            )
         if (
             isinstance(parallel_config["tensor"], dict)
             and parallel_config["tensor"]["mode"] == TensorParallelMode.isp.name
@@ -560,6 +621,9 @@ class ParallelContext(metaclass=SingletonMeta):
             self.zero1_parallel_size,
             self.nettest_parallel_size,
             self.expert_parallel_size,
+            self.expert_sequence_parallel_size,
+            self.expert_weight_parallel_size,
+            self.expert_data_parallel_size,
         ]
 
         # run initialization of different process groups

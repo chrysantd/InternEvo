@@ -1,7 +1,9 @@
 from .parallel_context import (
+    IS_REPLICA_EXPERT_DATA_PARALLEL,
     IS_REPLICA_ZERO_PARALLEL,
     IS_TENSOR_EXPERT_DATA_PARALLEL,
     IS_TENSOR_ZERO_PARALLEL,
+    IS_WEIGHT_EXPERT_DATA_PARALLEL,
     IS_WEIGHT_ZERO_PARALLEL,
     Config,
     ParallelContext,
@@ -30,8 +32,10 @@ from .random import (
 
 __all__ = [
     "Config",
+    "IS_REPLICA_EXPERT_DATA_PARALLEL",
     "IS_TENSOR_ZERO_PARALLEL",
     "IS_REPLICA_ZERO_PARALLEL",
+    "IS_WEIGHT_EXPERT_DATA_PARALLEL",
     "IS_WEIGHT_ZERO_PARALLEL",
     "IS_TENSOR_EXPERT_DATA_PARALLEL",
     "global_context",

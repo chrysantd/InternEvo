@@ -14,9 +14,11 @@ from internlm.accelerator import AcceleratorType, get_accelerator
 from internlm.core.context import Config, ParallelMode
 from internlm.core.context import global_context as gpc
 from internlm.core.context.parallel_context import (
+    IS_REPLICA_EXPERT_DATA_PARALLEL,
     IS_REPLICA_ZERO_PARALLEL,
     IS_TENSOR_EXPERT_DATA_PARALLEL,
     IS_TENSOR_ZERO_PARALLEL,
+    IS_WEIGHT_EXPERT_DATA_PARALLEL,
     IS_WEIGHT_ZERO_PARALLEL,
 )
 from internlm.core.parallel.comm.zero import ParamAsyncBcastHandler
@@ -83,6 +85,7 @@ class HybridZeroOptimizer(BaseOptimizer):
         self._overlap_sync_grad = zero_cfg.overlap_sync_grad
         self._overlap_sync_param = zero_cfg.overlap_sync_param
         self.use_isp = is_using_isp()
+        self.moe_no_tp = getattr(gpc.config.parallel.expert, "no_tp", False)
 
         super().__init__(optim=optimizer)
 
@@ -653,7 +656,12 @@ class HybridZeroOptimizer(BaseOptimizer):
                     setattr(param, IS_REPLICA_ZERO_PARALLEL, True)
             elif self._is_moe_group(self.optim.param_groups[group_id]):
                 for param in params:
-                    setattr(param, IS_TENSOR_EXPERT_DATA_PARALLEL, True)
+                    if self.moe_no_tp:
+                        setattr(param, IS_REPLICA_EXPERT_DATA_PARALLEL, True)
+                    elif self.use_isp:
+                        setattr(param, IS_WEIGHT_EXPERT_DATA_PARALLEL, True)
+                    else:
+                        setattr(param, IS_TENSOR_EXPERT_DATA_PARALLEL, True)
             else:
                 raise NotImplementedError("unrecognized parameter group.")
 
@@ -672,6 +680,10 @@ class HybridZeroOptimizer(BaseOptimizer):
                     delattr(param, IS_WEIGHT_ZERO_PARALLEL)
                 if hasattr(param, IS_TENSOR_EXPERT_DATA_PARALLEL):
                     delattr(param, IS_TENSOR_EXPERT_DATA_PARALLEL)
+                if hasattr(param, IS_WEIGHT_EXPERT_DATA_PARALLEL):
+                    delattr(param, IS_WEIGHT_EXPERT_DATA_PARALLEL)
+                if hasattr(param, IS_REPLICA_EXPERT_DATA_PARALLEL):
+                    delattr(param, IS_REPLICA_EXPERT_DATA_PARALLEL)
 
         return norm
 

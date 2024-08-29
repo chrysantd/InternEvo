@@ -11,9 +11,11 @@ from torch.utils.data import DataLoader
 
 from internlm.accelerator import AcceleratorType, get_accelerator
 from internlm.core.context import (
+    IS_REPLICA_EXPERT_DATA_PARALLEL,
     IS_REPLICA_ZERO_PARALLEL,
     IS_TENSOR_EXPERT_DATA_PARALLEL,
     IS_TENSOR_ZERO_PARALLEL,
+    IS_WEIGHT_EXPERT_DATA_PARALLEL,
     IS_WEIGHT_ZERO_PARALLEL,
     ParallelMode,
 )
@@ -54,12 +56,7 @@ from internlm.model.modules.linear import (
     RowParallelLinear,
     ScaleColumnParallelLinear,
 )
-from internlm.model.modules.utils import is_moe_param
-from internlm.model.moe.megablock.mlp import (
-    MegaBlockFeedForward,
-    MegaBlockGroupedFeedForward,
-)
-from internlm.model.moe.moe import MoE
+from internlm.model.moe import Experts, MoE
 from internlm.model.ops.norm import RMSNorm
 from internlm.model.registry import register_model_initializer
 from internlm.monitor import set_env_var
@@ -77,10 +74,12 @@ from internlm.utils.common import DummyProfile, SchedulerHook, get_current_devic
 from internlm.utils.logger import get_logger
 from internlm.utils.megatron_timers import megatron_timer as timer
 from internlm.utils.parallel import (
+    is_replica_expert_data_parallel_parameter,
     is_replica_zero_parallel_parameter,
     is_tensor_expert_data_parallel_parameter,
     is_tensor_zero_parallel_parameter,
     is_using_isp,
+    is_weight_expert_data_parallel_parameter,
     is_weight_zero_parallel_parameter,
     sync_model_param,
     sync_model_replica_param_group,
@@ -126,18 +125,25 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
                 elif gpc.is_initialized(ParallelMode.TENSOR) and not is_using_isp():
                     setattr(param, IS_TENSOR_ZERO_PARALLEL, True)
 
-        # for linear module
-        if isinstance(
-            module,
-            (ParallelLinearWithCommExt, MegaBlockFeedForward, MegaBlockGroupedFeedForward),
-        ):
+        # for moe linear module
+        if isinstance(module, Experts):
             for param in module.parameters():
-                if gpc.is_initialized(ParallelMode.EXPERT_DATA) and is_moe_param(param):
-                    # module should be MoE experts's linear
+                if (
+                    gpc.is_initialized(ParallelMode.TENSOR)
+                    and not is_using_isp()
+                    and getattr(gpc.config.parallel.expert, "no_tp", False)
+                ):
+                    setattr(param, IS_REPLICA_EXPERT_DATA_PARALLEL, True)
+                elif gpc.is_initialized(ParallelMode.TENSOR) and not is_using_isp():
                     setattr(param, IS_TENSOR_EXPERT_DATA_PARALLEL, True)
-                elif not is_moe_param(param) and gpc.is_initialized(ParallelMode.TENSOR) and not is_using_isp():
+                elif gpc.is_initialized(ParallelMode.WEIGHT) and is_using_isp():
+                    setattr(param, IS_WEIGHT_EXPERT_DATA_PARALLEL, True)
+        # for non-moe linear module
+        elif isinstance(module, ParallelLinearWithCommExt):
+            for param in module.parameters():
+                if gpc.is_initialized(ParallelMode.TENSOR) and not is_using_isp():
                     setattr(param, IS_TENSOR_ZERO_PARALLEL, True)
-                elif not is_moe_param(param) and gpc.is_initialized(ParallelMode.WEIGHT) and is_using_isp():
+                elif gpc.is_initialized(ParallelMode.WEIGHT) and is_using_isp():
                     setattr(param, IS_WEIGHT_ZERO_PARALLEL, True)
 
         # for vit and vit project
@@ -156,7 +162,9 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
                 or is_tensor_zero_parallel_parameter(param)
                 or is_weight_zero_parallel_parameter(param)
                 or is_tensor_expert_data_parallel_parameter(param)
-            ), f"parameter with name:{name} has no parallel attribution."
+                or is_weight_expert_data_parallel_parameter(param)
+                or is_replica_expert_data_parallel_parameter(param)
+            ), f"parameter with name: {name} has no parallel attribution."
 
 
 @llm_timeout(func_name="initialize_model")
@@ -274,6 +282,12 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
         RowParallelLinear.register_cls_communicator(
             TensorParallelCommunicator(process_group=gpc.get_group(ParallelMode.TENSOR), role=LinearRole.ROW)
         )
+
+        if gpc.config.model.get("num_experts", 1) > 1:
+            if gpc.config.parallel.expert.no_tp:
+                for moe in _submodule_filter(model, MoE):
+                    MoESequenceParallelCommunicator(ParallelMode.TENSOR, reverse=True).register_module_hook(moe)
+
         _head_communicator = HeadTensorParallelCommunicator(ParallelMode.TENSOR, _retain_out_sharded)
         _embedding_communicator = EmbeddingTensorParallelCommunicator(ParallelMode.TENSOR)
     # sequence parallel
@@ -300,23 +314,6 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
         )
 
         _embedding_communicator = EmbeddingSequenceParallelCommunicator(ParallelMode.TENSOR)
-
-        # MoE sequence parallel
-        if gpc.config.model.get("num_experts", 1) > 1:
-            _column_communicator = TensorParallelCommunicator(
-                process_group=gpc.get_group(ParallelMode.TENSOR), role=LinearRole.COLUMN
-            )
-            _row_communicator = TensorParallelCommunicator(
-                process_group=gpc.get_group(ParallelMode.TENSOR), role=LinearRole.ROW
-            )
-            for moe in _submodule_filter(model, MoE):
-                # 1. the linear in MoE degrades the parallel communication pattern from sp to tp
-                for column_linear in _submodule_filter(moe, ColumnParallelLinear):
-                    column_linear.register_communicator(_column_communicator)
-                for row_linear in _submodule_filter(moe, RowParallelLinear):
-                    row_linear.register_communicator(_row_communicator)
-                # 2. register MoESequenceParallelCommunicator for MoE layer
-                MoESequenceParallelCommunicator(ParallelMode.TENSOR).register_module_hook(moe)
 
     # register communitorc for embedding layer.
     for embedding in _submodule_filter(model, Embedding1D):
