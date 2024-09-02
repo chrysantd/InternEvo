@@ -63,6 +63,7 @@ class MoE(torch.nn.Module):
         mlp_layer_fusion: bool = False,
         multiple_of: int = 256,
         activation_type: str = "swiglu",
+        use_test_mlp=False,
     ):
 
         super().__init__()
@@ -87,6 +88,7 @@ class MoE(torch.nn.Module):
             mlp_layer_fusion=mlp_layer_fusion,
             multiple_of=multiple_of,
             activation_type=activation_type,
+            use_test_mlp=use_test_mlp,
             **moe_layer_kwargs,
         )
         set_fp32_attr_to_module(self.moe_layer.gate)

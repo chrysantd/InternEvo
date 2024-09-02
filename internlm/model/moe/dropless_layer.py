@@ -144,6 +144,7 @@ class DroplessMoELayer(BaseMoELayer):
         capacity_factor: float = None,
         noisy_gate_policy: str = None,
         moe_grouped_mlp: bool = True,
+        use_test_mlp: bool = False,
         enable_fused_permute: bool = True,
     ) -> None:
         assert noisy_gate_policy is None or noisy_gate_policy in ["None", "Jitter", "RSample"], (
@@ -168,6 +169,7 @@ class DroplessMoELayer(BaseMoELayer):
                         mlp_layer_fusion=mlp_layer_fusion,
                         multiple_of=multiple_of,
                         activation_type=activation_type,
+                        use_test=use_test_mlp,
                     )
                     for _ in range(num_experts // ep_size)
                 ]
