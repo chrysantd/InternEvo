@@ -55,7 +55,7 @@ from internlm.model.modules.linear import (
     ScaleColumnParallelLinear,
 )
 from internlm.model.modules.utils import is_moe_param
-from internlm.model.moe.megablock.mlp import (
+from internlm.model.moe.megablocks.mlp import (
     MegaBlockFeedForward,
     MegaBlockGroupedFeedForward,
 )

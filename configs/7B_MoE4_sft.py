@@ -155,9 +155,9 @@ model = dict(
     # qk_interleaved = False: q[-1] = [q1,q3,q5,...,q2,q4,q6,...], k[-1] = [k1,k3,k5,...,k2,k4,k6,...]
     qk_interleaved=False,
     num_chunks=1,  # if num_chunks > 1, interleaved pipeline scheduler is used.
+    moe_type="GShard",  # Support: "GShard", "MegaBlock", "MegaBlock-D", "Dropless"
     num_experts=4,
-    moe_use_residual=False,
-    moe_type="GShard",  # Support: "GShard", "MegaBlock", "MegaBlock-D"
+    top_k=2,
 )
 """
 zero1 parallel (dict):
@@ -207,18 +207,6 @@ monitor = dict(
     ),
 )
 
-# custom moe impl configs
-# GShard MoE config
-moe = dict(
-    top_k=2,
-    capacity_factor=1.0,
-    eval_capacity_factor=1.0,
-    min_capacity=4,
-    noisy_gate_policy=None,
-    drop_tokens=True,
-    use_rts=True,
-    use_fused_gating=False,
-)
 
 # MegaBlock MoE config
 # moe = dict(

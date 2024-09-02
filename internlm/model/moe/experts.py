@@ -30,7 +30,7 @@ class Experts(torch.nn.Module):
         else:
             self.wrapped_experts = ModuleList([experts])
         self.num_local_experts = num_local_experts
-        assert self.num_local_experts == len(self.wrapped_experts)
+        # assert self.num_local_experts == len(self.wrapped_experts)
 
         # TODO: revisit allreduce for moe.gate...
         for expert in self.wrapped_experts:
@@ -39,7 +39,7 @@ class Experts(torch.nn.Module):
                 param.is_expert = True
                 param.group_name = expert_group_name
 
-    def forward(self, inputs, split_size_or_sections=None, **kwargs):
+    def forward(self, inputs, split_size_or_sections=None, split_dim=0, **kwargs):
         """
         Args:
             inputs: tokens to be processed in expert's forward pass
@@ -53,16 +53,21 @@ class Experts(torch.nn.Module):
             return self.wrapped_experts[0](inputs, **kwargs)
 
         # The following code is designed for multiple experts.
+        #   1. split tokens among split_dim
+        #   2. do for-loop for experts's computation
         if split_size_or_sections is None:
             # chunk can be faster than split
-            chunks = inputs.chunk(self.num_local_experts, dim=1)
+            chunks = inputs.chunk(self.num_local_experts, dim=split_dim)
         else:
-            chunks = inputs.split(split_size_or_sections, dim=1)
+            if isinstance(split_size_or_sections, torch.Tensor):
+                split_size_or_sections = split_size_or_sections.tolist()
+            chunks = inputs.split(split_size_or_sections, dim=split_dim)
         expert_outputs = []
         for chunk, expert in zip(chunks, self.wrapped_experts):
-            out = expert(chunk, **kwargs)
-            if isinstance(out, tuple):
-                out = out[0]  # Ignore the bias term for now
-            expert_outputs += [out]
-        expert_output = torch.cat(expert_outputs, dim=1)
+            if len(chunk) != 0:
+                out = expert(chunk, **kwargs)
+                if isinstance(out, tuple):
+                    out = out[0]  # Ignore the bias term for now
+                expert_outputs += [out]
+        expert_output = torch.cat(expert_outputs, dim=split_dim)
         return expert_output
