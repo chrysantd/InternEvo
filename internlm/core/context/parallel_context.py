@@ -440,6 +440,16 @@ class ParallelContext(metaclass=SingletonMeta):
             f"({pps}) * weight parallel size ({wps})"
         )
 
+        # for expert
+        eps = self.expert_parallel_size
+        edps = self.expert_data_parallel_size
+        # TODO for moe with isp, we have ws == eps * edps * ewps * pps
+        assert ws == eps * edps * tps * pps, (
+            f"Expected the world size {ws} to be equal to expert parallel "
+            f"size ({eps}) * expert data parallel size ({edps}) * tensor "
+            f"parallel size ({tps}) * pipeline parallel size ({pps})"
+        )
+
         assert self.zero1_parallel_size > 0
 
         # check for fsdp:
@@ -484,11 +494,14 @@ class ParallelContext(metaclass=SingletonMeta):
                 parallel_config._add_item("tensor", dict(size=1, mode=TensorParallelMode.mtp.name))
             if "weight" not in parallel_config:
                 parallel_config._add_item("weight", dict(size=1, overlap=False, memory_pool=False))
+            if "expert" not in parallel_config:
+                parallel_config._add_item("expert", dict(size=-1))
 
             # get value from config
             self._set_parallel_size_from_config(parallel_config, "weight", "weight_parallel_size")
             self._set_parallel_size_from_config(parallel_config, "tensor", "tensor_parallel_size")
             self._set_parallel_size_from_config(parallel_config, "pipeline", "pipeline_parallel_size")
+            self._set_parallel_size_from_config(parallel_config, "expert", "expert_parallel_size")
             self._set_parallel_size_from_config(parallel_config, "zero1", "zero1_parallel_size")
 
         # the user should not set the data parallel size manually
@@ -544,7 +557,13 @@ class ParallelContext(metaclass=SingletonMeta):
         # by default, expert_parallel_size equals to data_parallel_size, but if the number of experts is smaller
         # than data_parallel_size, set expert_parallel_size to be the number of experts to make sure each device
         # has one expert.
-        self.expert_parallel_size = min(self.data_parallel_size, self.config.model.get("num_experts", 1))
+        if self.expert_parallel_size == -1:
+            self.expert_parallel_size = min(self.data_parallel_size, self.config.model.get("num_experts", 1))
+        # TODO for moe with isp, we have edp = ws/pp/ewp/ep
+        self.expert_data_parallel_size = max(
+            1,
+            self.world_size // self.pipeline_parallel_size // self.sequence_parallel_size // self.expert_parallel_size,
+        )
 
         self.check_sanity()
 

@@ -75,6 +75,8 @@ class MegaBlockMoE(BaseMoELayer):
         # so that we can pass it to radix sort.
         self.sort_end_bit = max(int(np.ceil(np.log2(self.num_experts))), 1)
         self.quantize_scatter_num_bits = -1
+        # re-init the number of experts in each device
+        self.num_local_experts = num_experts // ep_size
 
         self.forward_fn = self._parallel_forward if gpc.expert_parallel_size > 1 else self._forward
 
