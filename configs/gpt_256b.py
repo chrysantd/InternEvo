@@ -155,9 +155,12 @@ model = dict(
     # qk_interleaved = False: q[-1] = [q1,q3,q5,...,q2,q4,q6,...], k[-1] = [k1,k3,k5,...,k2,k4,k6,...]
     qk_interleaved=False,
     num_chunks=1,  # if num_chunks > 1, interleaved pipeline scheduler is used.
-    moe_type="GShard",  # Support: "GShard", "MegaBlock", "MegaBlock-D", "Dropless"
+    moe_type="Dropless",  # Support: "GShard", "MegaBlock", "MegaBlock-D", "Dropless"
     num_experts=16,
     top_k=2,
+    moe_layer_kwargs=dict(
+        moe_grouped_mlp=False,
+    ),
 )
 """
 zero1 parallel (dict):
@@ -189,6 +192,7 @@ parallel = dict(
     tensor=dict(size=1, mode="mtp"),
     pipeline=dict(size=1, interleaved_overlap=True),
     weight=dict(size=1, overlap=True, memory_pool=True),
+    expert=1,
 )
 
 cudnn_deterministic = False
