@@ -283,10 +283,21 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
             TensorParallelCommunicator(process_group=gpc.get_group(ParallelMode.TENSOR), role=LinearRole.ROW)
         )
 
-        if gpc.config.model.get("num_experts", 1) > 1:
-            if gpc.config.parallel.expert.no_tp:
-                for moe in _submodule_filter(model, MoE):
-                    MoESequenceParallelCommunicator(ParallelMode.TENSOR, reverse=True).register_module_hook(moe)
+        if gpc.config.model.get("num_experts", 1) > 1 and gpc.config.parallel.expert.no_tp:
+            _column_communicator = TensorParallelCommunicator(
+                process_group=gpc.get_group(ParallelMode.EXPERT_TENSOR), role=LinearRole.COLUMN
+            )
+            _row_communicator = TensorParallelCommunicator(
+                process_group=gpc.get_group(ParallelMode.EXPERT_TENSOR), role=LinearRole.ROW
+            )
+            for moe in _submodule_filter(model, MoE):
+                # 1. the linear in MoE degrades as no tp communication pattern
+                for column_linear in _submodule_filter(moe, ColumnParallelLinear):
+                    column_linear.register_communicator(_column_communicator)
+                for row_linear in _submodule_filter(moe, RowParallelLinear):
+                    row_linear.register_communicator(_row_communicator)
+                # 2. register MoESequenceParallelCommunicator for MoE layer
+                MoESequenceParallelCommunicator(ParallelMode.TENSOR, reverse=True).register_module_hook(moe)
 
         _head_communicator = HeadTensorParallelCommunicator(ParallelMode.TENSOR, _retain_out_sharded)
         _embedding_communicator = EmbeddingTensorParallelCommunicator(ParallelMode.TENSOR)
@@ -308,6 +319,19 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
                 save_total_input_as_activation=save_total_input_as_activation,
             )
         )
+        if gpc.config.model.get("num_experts", 1) > 1 and gpc.config.parallel.expert.no_tp:
+            _column_communicator = TensorParallelCommunicator(
+                process_group=gpc.get_group(ParallelMode.EXPERT_TENSOR), role=LinearRole.COLUMN
+            )
+            _row_communicator = TensorParallelCommunicator(
+                process_group=gpc.get_group(ParallelMode.EXPERT_TENSOR), role=LinearRole.ROW
+            )
+            for moe in _submodule_filter(model, MoE):
+                # 1. the linear in MoE degrades as no tp communication pattern
+                for column_linear in _submodule_filter(moe, ColumnParallelLinear):
+                    column_linear.register_communicator(_column_communicator)
+                for row_linear in _submodule_filter(moe, RowParallelLinear):
+                    row_linear.register_communicator(_row_communicator)
 
         _head_communicator = HeadSequenceParallelCommunicator(
             ParallelMode.TENSOR, _retain_out_sharded, save_total_input_as_activation

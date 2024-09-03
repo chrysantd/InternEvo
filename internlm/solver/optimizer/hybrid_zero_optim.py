@@ -22,6 +22,7 @@ from internlm.core.context.parallel_context import (
     IS_WEIGHT_ZERO_PARALLEL,
 )
 from internlm.core.parallel.comm.zero import ParamAsyncBcastHandler
+from internlm.model.modules.utils import is_gate_param
 from internlm.monitor import send_alert_message
 from internlm.solver.optimizer.store import (
     BucketStore,
@@ -370,7 +371,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                         is_using_sequence_parallel()
                         and hasattr(param, IS_REPLICA_ZERO_PARALLEL)
                         and getattr(param, IS_REPLICA_ZERO_PARALLEL) is True
-                    ):
+                    ) or (is_gate_param(param) and gpc.config.parallel.expert.no_tp):
                         accum_grad_obj.register_hook(extra_layernorm_reduce_grad_hook)
 
                     # we should not only register for parameters which have isp_reduce_scatter_name attr.

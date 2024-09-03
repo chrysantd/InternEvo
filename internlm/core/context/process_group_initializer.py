@@ -48,6 +48,9 @@ class ParallelMode(Enum):
     # expert data parallel
     EXPERT_DATA = "expert_data"
 
+    # expert data parallel
+    EXPERT_TENSOR = "expert_tensor"
+
     # dummy mode, only used during mode construction
     DUMMY = "dummy"
 
@@ -588,6 +591,27 @@ class Initializer_Expert_Data(ProcessGroupInitializer):
                 ranks_in_group = ranks
                 groups.append(
                     (local_rank, group_world_size, process_group, cpu_group, ranks_in_group, ParallelMode.EXPERT_DATA)
+                )
+
+        if self.expert_tensor_parallel_size == 1:
+            ranks = [self.rank]
+            group = dist.new_group(ranks, timeout=LLM_NCCL_TIMEOUT)
+            if use_cpu:
+                group_cpu = (
+                    dist.new_group(ranks, backend="gloo", timeout=LLM_NCCL_TIMEOUT)
+                    if dist.get_backend() != "gloo"
+                    else group
+                )
+            else:
+                group_cpu = None
+            if self.rank in ranks:
+                local_rank = ranks.index(self.rank)
+                group_world_size = len(ranks)
+                process_group = group
+                cpu_group = group_cpu
+                ranks_in_group = ranks
+                groups.append(
+                    (local_rank, group_world_size, process_group, cpu_group, ranks_in_group, ParallelMode.EXPERT_TENSOR)
                 )
 
         return groups

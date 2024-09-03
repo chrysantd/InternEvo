@@ -28,9 +28,18 @@ class BaseMoELayer(Base):
         if expert_group_name not in gpc.expert_parallel_group_names:
             gpc.expert_parallel_group_names.append(expert_group_name)
         self.gate = gate
-        self.experts = Experts(experts, num_local_experts, expert_group_name)
+        self.experts = Experts(experts, num_local_experts)
         self.ep_group = ep_group
         self.ep_size = ep_size
         self.num_local_experts = num_local_experts
         self.l_aux = torch.tensor(0.0, device=get_current_device(), dtype=gpc.config.model.get("dtype"))
         self.exp_counts = None
+
+        for _, param in self.gate.named_parameters():
+            param.is_gate = True
+
+        for expert in self.experts.wrapped_experts:
+            # TODO: Create param groups to handle expert + data case (e.g. param.group = moe_group)
+            for _, param in expert.named_parameters():
+                param.is_expert = True
+                param.group_name = expert_group_name
