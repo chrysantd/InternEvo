@@ -183,12 +183,20 @@ weight parallel (dict):
     1. size: int, the size of weight parallel.
     2. overlap: bool, enable/disable all_gather/reduce_scatter communication overlap, defaults to False.
     3. memory_pool: bool, enable/disable memory pool, defaults to False.
+expert parallel (dict):
+    1. size: int
+        * if size <= 0, ep size equals to dp size, but if the number of experts is smaller than dp size, set ep size
+            to be the number of experts to make sure each device has one expert.
+        * if size == 1, all experts are placed in each device, running as dp-only.
+        * if size > 1, all experts are placed in k devices and each device has n/k experts, where n is the total
+            number of experts and k = size.
 """
 parallel = dict(
     zero1=dict(size=-1, fsdp=False),
     tensor=dict(size=1, mode="mtp"),
     pipeline=dict(size=1, interleaved_overlap=True),
     weight=dict(size=1, overlap=True, memory_pool=True),
+    expert=dict(size=-1, no_tp=False),
 )
 
 cudnn_deterministic = False
