@@ -501,6 +501,7 @@ class GShardMOELayer(BaseMoELayer):
                         bias=False,
                         device=device,
                         dtype=dtype,
+                        is_expert=True,
                     )
                     for _ in range(num_experts // ep_size)
                 ]
