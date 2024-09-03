@@ -15,10 +15,12 @@ from internlm.core.context import global_context as gpc
 from internlm.utils.common import get_current_device, get_tensor_norm, move_norm_to_cuda
 from internlm.utils.logger import get_logger
 from internlm.utils.parallel import (
+    is_replica_expert_data_parallel_parameter,
     is_replica_zero_parallel_parameter,
     is_tensor_expert_data_parallel_parameter,
     is_tensor_zero_parallel_parameter,
     is_using_isp,
+    is_weight_expert_data_parallel_parameter,
     is_weight_zero_parallel_parameter,
 )
 
@@ -253,6 +255,12 @@ def reduce_grads(gradients, parameters, weight_parallel_mode):
             parallel_grads.append(g.data.float())
         elif is_tensor_expert_data_parallel_parameter(p):
             # process all ranks for IS_TENSOR_EXPERT_DATA_PARALLEL parameter group
+            parallel_grads.append(g.data.float())
+        elif is_weight_expert_data_parallel_parameter(p):
+            # process all ranks for IS_WEIGHT_EXPERT_DATA_PARALLEL parameter group
+            parallel_grads.append(g.data.float())
+        elif is_replica_expert_data_parallel_parameter(p) and gpc.get_local_rank(weight_parallel_mode) == 0:
+            # process all ranks for IS_REPLICA_EXPERT_DATA_PARALLEL parameter group
             parallel_grads.append(g.data.float())
         elif gpc.get_local_rank(weight_parallel_mode) != 0:
             continue

@@ -4,9 +4,11 @@
 import torch.distributed as dist
 
 from internlm.core.context import (
+    IS_REPLICA_EXPERT_DATA_PARALLEL,
     IS_REPLICA_ZERO_PARALLEL,
     IS_TENSOR_EXPERT_DATA_PARALLEL,
     IS_TENSOR_ZERO_PARALLEL,
+    IS_WEIGHT_EXPERT_DATA_PARALLEL,
     IS_WEIGHT_ZERO_PARALLEL,
     ParallelMode,
 )
@@ -57,6 +59,18 @@ def is_tensor_expert_data_parallel_parameter(p):
         and hasattr(p, IS_TENSOR_EXPERT_DATA_PARALLEL)
         and getattr(p, IS_TENSOR_EXPERT_DATA_PARALLEL)
     )
+
+
+def is_weight_expert_data_parallel_parameter(p):
+    return (
+        gpc.is_initialized(ParallelMode.WEIGHT)
+        and hasattr(p, IS_WEIGHT_EXPERT_DATA_PARALLEL)
+        and getattr(p, IS_WEIGHT_EXPERT_DATA_PARALLEL)
+    )
+
+
+def is_replica_expert_data_parallel_parameter(p):
+    return hasattr(p, IS_REPLICA_EXPERT_DATA_PARALLEL) and getattr(p, IS_REPLICA_EXPERT_DATA_PARALLEL)
 
 
 def sync_model_param(model):

@@ -90,6 +90,12 @@ def args_sanity_check():
     if "weight" not in gpc.config.parallel:
         gpc.config.parallel._add_item("weight", dict(size=1, overlap=False, memory_pool=False))
 
+    if "expert" not in gpc.config.parallel:
+        gpc.config.parallel._add_item("expert", dict(size=-1, no_tp=True))
+
+    if "expert_weight" not in gpc.config.parallel:
+        gpc.config.parallel._add_item("expert_weight", dict(size=1, overlap=False, memory_pool=False))
+
     if isinstance(gpc.config.parallel.pipeline, int):
         pp = gpc.config.parallel.pipeline
     else:
@@ -473,6 +479,9 @@ def args_sanity_check():
 
     if "moe_loss_coeff" not in gpc.config.loss:
         gpc.config.loss._add_item("moe_loss_coeff", 1.0)
+
+    if gpc.config.parallel.expert.get("no_tp", None) is None:
+        gpc.config.parallel.expert.no_tp = False
 
     # moe not support overlap and zero1.5 for now
     if gpc.config.model.get("num_experts", 1) > 1:

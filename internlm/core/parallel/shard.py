@@ -46,11 +46,15 @@ def split_data_sequence_parallel(data, label):
 
 # The head layer in ISP mode is actually a special case,
 # and we would prefer a unified segmentation and communication logic.
-def get_tensor_split_parallel_mode() -> ParallelMode:
+def get_tensor_split_parallel_mode(is_expert=False) -> ParallelMode:
     tp_mode = gpc.config.parallel.tensor.mode
 
     if tp_mode == TensorParallelMode.isp.name:
         return ParallelMode.WEIGHT
+    elif tp_mode == "isp" and is_expert:
+        return ParallelMode.EXPERT_WEIGHT
+    elif tp_mode != "isp" and is_expert and gpc.config.parallel.expert.no_tp:
+        return ParallelMode.DUMMY
     else:
         return ParallelMode.TENSOR
 

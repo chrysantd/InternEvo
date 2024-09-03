@@ -169,6 +169,7 @@ class DroplessMoELayer(BaseMoELayer):
                         mlp_layer_fusion=mlp_layer_fusion,
                         multiple_of=multiple_of,
                         activation_type=activation_type,
+                        is_expert=True,
                         use_test=use_test_mlp,
                     )
                     for _ in range(num_experts // ep_size)

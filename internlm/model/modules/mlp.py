@@ -69,6 +69,7 @@ class FeedForward(nn.Module):
         multiple_of: int = 256,
         mlp_layer_fusion: Optional[bool] = False,
         activation_type: str = "swiglu",
+        is_expert: bool = False,
     ):
         super().__init__()
 
@@ -82,15 +83,25 @@ class FeedForward(nn.Module):
         if self.mlp_layer_fusion:
             assert bias is False, "Fuesd FeedForward only support bias is False."
 
-            self.fused_w1_w3 = new_linear("w13", in_features, hidden_features * 2, bias, device=device, dtype=dtype)
-            self.w2 = new_linear("w2", hidden_features, out_features, bias, device=device, dtype=dtype)
+            self.fused_w1_w3 = new_linear(
+                "w13", in_features, hidden_features * 2, bias, device=device, dtype=dtype, is_expert=is_expert
+            )
+            self.w2 = new_linear(
+                "w2", hidden_features, out_features, bias, device=device, dtype=dtype, is_expert=is_expert
+            )
 
             self._register_load_state_dict_pre_hook(_mlp_pre_load_convert, with_module=True)
             self._register_state_dict_hook(_mlp_save_convert)
         else:
-            self.w1 = new_linear("w1", in_features, hidden_features, bias, device=device, dtype=dtype)
-            self.w2 = new_linear("w2", hidden_features, out_features, bias, device=device, dtype=dtype)
-            self.w3 = new_linear("w3", in_features, hidden_features, bias, device=device, dtype=dtype)
+            self.w1 = new_linear(
+                "w1", in_features, hidden_features, bias, device=device, dtype=dtype, is_expert=is_expert
+            )
+            self.w2 = new_linear(
+                "w2", hidden_features, out_features, bias, device=device, dtype=dtype, is_expert=is_expert
+            )
+            self.w3 = new_linear(
+                "w3", in_features, hidden_features, bias, device=device, dtype=dtype, is_expert=is_expert
+            )
 
     def forward(self, x):
         if not self.mlp_layer_fusion:
@@ -131,6 +142,7 @@ class FeedForwardTest(nn.Module):
         multiple_of: int = 256,
         mlp_layer_fusion: Optional[bool] = False,
         activation_type: str = "swiglu",
+        is_expert: bool = False,
     ):
         super().__init__()
 
@@ -141,8 +153,8 @@ class FeedForwardTest(nn.Module):
 
         hidden_features = multiple_of * ((hidden_features + multiple_of - 1) // multiple_of)
 
-        self.w1 = new_linear("w1", in_features, hidden_features, bias, device=device, dtype=dtype)
-        self.w2 = new_linear("w2", hidden_features, out_features, bias, device=device, dtype=dtype)
+        self.w1 = new_linear("w1", in_features, hidden_features, bias, device=device, dtype=dtype, is_expert=is_expert)
+        self.w2 = new_linear("w2", hidden_features, out_features, bias, device=device, dtype=dtype, is_expert=is_expert)
 
     def forward(self, x):
         w1_o = self.w1(x)
@@ -160,6 +172,7 @@ def new_feed_forward(
     multiple_of: int = 256,
     mlp_layer_fusion: Optional[bool] = False,
     activation_type: str = "swiglu",
+    is_expert: bool = False,
     use_test=False,
 ) -> FeedForward:
     if use_test:
@@ -173,6 +186,7 @@ def new_feed_forward(
             multiple_of,
             mlp_layer_fusion,
             activation_type,
+            is_expert,
         )
     else:
         return FeedForward(
@@ -185,4 +199,5 @@ def new_feed_forward(
             multiple_of,
             mlp_layer_fusion,
             activation_type,
+            is_expert,
         )
