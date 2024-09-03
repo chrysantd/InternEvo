@@ -15,7 +15,7 @@ class Experts(torch.nn.Module):
     Local Experts.
     """
 
-    def __init__(self, experts: Union[Module, ModuleList], num_local_experts=1, expert_group_name=None):
+    def __init__(self, experts: Union[Module, ModuleList], num_local_experts=1):
         """
         Encapsulating the moe experts.
         Args:
@@ -31,13 +31,6 @@ class Experts(torch.nn.Module):
             self.wrapped_experts = ModuleList([experts])
         self.num_local_experts = num_local_experts
         assert self.num_local_experts == len(self.wrapped_experts)
-
-        # TODO: revisit allreduce for moe.gate...
-        for expert in self.wrapped_experts:
-            # TODO: Create param groups to handle expert + data case (e.g. param.group = moe_group)
-            for _, param in expert.named_parameters():
-                param.is_expert = True
-                param.group_name = expert_group_name
 
     def forward(self, inputs, split_size_or_sections=None, **kwargs):
         """

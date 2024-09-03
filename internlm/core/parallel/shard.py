@@ -54,7 +54,7 @@ def get_tensor_split_parallel_mode(is_expert=False) -> ParallelMode:
     elif tp_mode == "isp" and is_expert:
         return ParallelMode.EXPERT_WEIGHT
     elif tp_mode != "isp" and is_expert and gpc.config.parallel.expert.no_tp:
-        return ParallelMode.DUMMY
+        return ParallelMode.EXPERT_TENSOR
     else:
         return ParallelMode.TENSOR
 
