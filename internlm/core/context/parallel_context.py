@@ -661,7 +661,10 @@ class ParallelContext(metaclass=SingletonMeta):
         if self.pipeline_parallel_size > 1:
             initializers.append(pgroup_initializer.Initializer_Pipeline(*initializer_args))
         if self.config.model.get("num_experts", 1) > 1:
-            initializers.append(pgroup_initializer.Initializer_Expert_Data(*initializer_args))
+            if isinstance(parallel_config["tensor"], dict) and parallel_config["tensor"]["mode"] == "isp":
+                initializers.append(pgroup_initializer.Initializer_Expert_Weight_Data(*initializer_args))
+            else:
+                initializers.append(pgroup_initializer.Initializer_Expert_Data(*initializer_args))
         if parallel_config.sequence_2D.get("enable", False) is True:
             initializers.append(pgroup_initializer.Initializer_2D_SEQUENCE_PARALLEL(*initializer_args))
 

@@ -32,6 +32,7 @@ from internlm.core.parallel.comm.isp import (
     ISPCommModelConfig,
     ISPCommunicator,
     ISPCommunicatorSchedulerHook,
+    ISPCommunicatorWrapper,
 )
 from internlm.core.parallel.comm.tensor import (
     EmbeddingSequenceParallelCommunicator,
@@ -288,7 +289,7 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
     Returns:
         An isp communicator for managing comp/comm overlap and memory pool.
     """
-    isp_communicator = None
+    isp_communicator_wrapper = None
     _retain_out_sharded = gpc.config.model.get("parallel_output", True)
 
     if is_using_isp():
@@ -313,6 +314,30 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
             retain_out_sharded=_retain_out_sharded,
         )
         _embedding_communicator = EmbeddingWeightParallelCommunicator(ParallelMode.WEIGHT)
+
+        if gpc.config.model.get("num_experts", 1) > 1:
+            # register communicator for moe isp column parallel linear.
+            # NOTE: this wil overwrite registed communicator
+            moe_isp_communicator = ISPCommunicator(
+                model,
+                ISPCommModelConfig(
+                    gpc.config.model.dtype,
+                    get_current_device(),
+                    gpc.config.model.checkpoint,
+                ),
+                gpc.config.parallel.expert_weight.overlap,
+                gpc.config.parallel.expert_weight.memory_pool,
+                gpc.get_group(ParallelMode.EXPERT_WEIGHT),
+            )
+            for moe in _submodule_filter(model, Experts):
+                for column_linear in _submodule_filter(moe, (ColumnParallelLinear)):
+                    column_linear.register_communicator(moe_isp_communicator)
+                for row_linear in _submodule_filter(moe, RowParallelLinear):
+                    row_linear.register_communicator(None)
+
+            isp_communicator_wrapper = ISPCommunicatorWrapper([isp_communicator, moe_isp_communicator])
+        else:
+            isp_communicator_wrapper = ISPCommunicatorWrapper([isp_communicator])
 
     # register communictor for mtp/msp/fsp linear.
 
@@ -389,11 +414,11 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
     ScaleColumnParallelLinear.register_cls_communicator(_head_communicator)
     RewardModelLinear.register_cls_communicator(_head_communicator)
 
-    return isp_communicator
+    return isp_communicator_wrapper
 
 
 @llm_timeout(func_name="initialize_optimizer")
-def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicator: ISPCommunicator = None):
+def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicator: ISPCommunicatorWrapper = None):
     """
     Initialize optimizer.
 
@@ -473,7 +498,7 @@ def initialize_optimizer(model: Union[nn.Module, nn.ModuleList], isp_communicato
     return optimizer, beta2_scheduler, lr_scheduler
 
 
-def get_scheduler_hooks(metric, zero_optim, isp_communicator) -> List[SchedulerHook]:
+def get_scheduler_hooks(metric, zero_optim, isp_communicator_wrapper) -> List[SchedulerHook]:
     scheduler_hooks: List[SchedulerHook] = []
 
     if metric is not None:
@@ -489,8 +514,10 @@ def get_scheduler_hooks(metric, zero_optim, isp_communicator) -> List[SchedulerH
             ),
         )
 
-    if isp_communicator is not None and gpc.config.parallel["weight"].get("overlap", False):
-        scheduler_hooks.append(ISPCommunicatorSchedulerHook(isp_communicator, zero_optim))
+    if isp_communicator_wrapper is not None:
+        for isp_communicator in isp_communicator_wrapper.isp_communicators:
+            if isp_communicator is not None and isp_communicator.overlap:
+                scheduler_hooks.append(ISPCommunicatorSchedulerHook(isp_communicator, zero_optim))
 
     return scheduler_hooks
 

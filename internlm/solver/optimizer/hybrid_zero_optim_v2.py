@@ -246,7 +246,7 @@ class HybridZeroOptimizer_v2(BaseOptimizer):
         bucket.reset_all()
 
     def accumulate_left_grads_after_backward(self):
-        if self._isp_communicator is None or self._isp_communicator.overlap is False:
+        if self._isp_communicator is None:
             return
 
         for group_id in range(self.num_param_groups):

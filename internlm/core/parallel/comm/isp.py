@@ -27,7 +27,7 @@ from internlm.core.parallel.comm.utils import (
 )
 from internlm.model.modules.embedding import Embedding1D
 from internlm.model.modules.linear import ParallelLinearWithCommExt
-from internlm.utils.common import SchedulerHook, get_current_device
+from internlm.utils.common import SchedulerHook, UniqueChainMap, get_current_device
 from internlm.utils.utils import (
     CuSeqlenType,
     QKVPackType,
@@ -433,36 +433,35 @@ class ISPCommunicator(WPCommunicator):
                 for idx, block in enumerate(children):
                     self._overlap_states[cid].index_to_isp_modules[idx] = []
                     self._overlap_states[cid].index_to_block[idx] = block
-                    for sub_name, sub in block.named_children():
-                        for name, child in sub.named_children():
-                            if name in ["out_proj", "wo"]:
-                                self._overlap_states[cid].isp_outs.append(child)
-                                self._overlap_states[cid].module_to_index[child] = idx
-                            if isinstance(child, ParallelLinearWithCommExt):
-                                if name not in self._module_shapes:
-                                    origin_shape = tuple(
-                                        [child.weight.shape[0] * gpc.weight_parallel_size]
-                                        + list(child.weight.shape[1:])
-                                    )
-                                    self._module_shapes[name] = torch.Size(origin_shape)
-                                self._overlap_states[cid].module_to_index[child] = idx
-                                self._overlap_states[cid].isp_modules.append(child)
-                                self._overlap_states[cid].index_to_isp_modules[idx].append(child)
-
-                                setattr(child, "isp_name", name)
-
-                                full_name = f"{cid}.{idx}.{sub_name}.{name}"
-                                setattr(
-                                    child.weight,
-                                    "isp_reduce_scatter_name",
-                                    f"{full_name}.weight",
+                    for name, child in block.named_modules():
+                        if name.split(".")[-1] in ["out_proj", "wo"]:
+                            self._overlap_states[cid].isp_outs.append(child)
+                            self._overlap_states[cid].module_to_index[child] = idx
+                        if isinstance(child, (ParallelLinearWithCommExt)):
+                            if name not in self._module_shapes:
+                                weight_parallel_size = dist.get_world_size(self.process_group)
+                                origin_shape = tuple(
+                                    [child.weight.shape[0] * weight_parallel_size] + list(child.weight.shape[1:])
                                 )
-                                if child.bias is not None:
-                                    setattr(
-                                        child.bias,
-                                        "isp_reduce_scatter_name",
-                                        f"{full_name}.bias",
-                                    )
+                                self._module_shapes[name] = torch.Size(origin_shape)
+                            self._overlap_states[cid].module_to_index[child] = idx
+                            self._overlap_states[cid].isp_modules.append(child)
+                            self._overlap_states[cid].index_to_isp_modules[idx].append(child)
+
+                            setattr(child, "isp_name", name)
+
+                            full_name = f"{cid}.{idx}.{name}"
+                            setattr(
+                                child.weight,
+                                "isp_reduce_scatter_name",
+                                f"{full_name}.weight",
+                            )
+                            if child.bias is not None:
+                                setattr(
+                                    child.bias,
+                                    "isp_reduce_scatter_name",
+                                    f"{full_name}.bias",
+                                )
 
         self._overlap_states[cid].num_blocks = len(self._overlap_states[cid].index_to_isp_modules)
 
@@ -782,7 +781,8 @@ class ISPCommunicatorSchedulerHook(SchedulerHook):
 
     def after_backward(self, scheduler, inputs_grad) -> None:  # pylint: disable=W0613
         # accumulate left gradients in last bucket after backward.
-        self._zero_optim.accumulate_left_grads_after_backward()
+        if self._isp_communicator and self._isp_communicator.overlap:
+            self._zero_optim.accumulate_left_grads_after_backward()
         # reset lazy memory pools for reduce scatter after every micro step.
         if self._isp_communicator and self._isp_communicator.enable_memory_pool:
             self._isp_communicator.memory_pool.reset_lazy_pools()
@@ -791,7 +791,48 @@ class ISPCommunicatorSchedulerHook(SchedulerHook):
         pass
 
 
-# adapted from https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/sequence/layer.py
+class ISPCommunicatorWrapper:
+    """
+    Wrapper for multiple ISPCommunicators.
+    TODO: check all isp communicator external interfaces and wrap them.
+    """
+
+    def __init__(
+        self,
+        isp_communicators: List[ISPCommunicator],
+    ) -> None:
+        self.isp_communicators = isp_communicators
+        self.reduce_scatter_handlers = {}
+
+        self.memory_pools = [
+            isp_communicator.memory_pool
+            for isp_communicator in self.isp_communicators
+            if isp_communicator.enable_memory_pool
+        ]
+        self.reduce_scatter_handlers = UniqueChainMap(
+            *(isp_communicator.reduce_scatter_handlers for isp_communicator in self.isp_communicators)
+        )
+
+        if self.memory_pools:
+            self.enable_memory_pool = True
+        else:
+            self.enable_memory_pool = False
+
+    def free_reduce_scatter_memory(self, key, index):
+        for memory_pool in self.memory_pools:
+            if key in memory_pool._reduce_scatter_memory_pool:
+                memory_pool.free_reduce_scatter_memory(key, index)
+
+    def reset_lazy_pools(self) -> None:
+        for memory_pool in self.memory_pools:
+            memory_pool.reset_lazy_pools()
+
+    def register_prerequisite_for_forward_prefetch_hooks(self, prerequisite_func: Callable) -> None:
+        for isp_communicator in self.isp_communicators:
+            isp_communicator.register_prerequisite_for_forward_prefetch_hooks(prerequisite_func)
+
+
+# adpated from https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/sequence/layer.py
 class _SeqAllToAll(torch.autograd.Function):
     "sequence alltoall function"
 

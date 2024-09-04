@@ -48,8 +48,11 @@ class ParallelMode(Enum):
     # expert data parallel
     EXPERT_DATA = "expert_data"
 
-    # expert data parallel
+    # expert tensor parallel
     EXPERT_TENSOR = "expert_tensor"
+
+    # expert weight parallel
+    EXPERT_WEIGHT = "expert_weight"
 
     # dummy mode, only used during mode construction
     DUMMY = "dummy"
@@ -634,6 +637,137 @@ class Initializer_Expert_Data(ProcessGroupInitializer):
                 ranks_in_group = ranks
                 groups.append(
                     (local_rank, group_world_size, process_group, cpu_group, ranks_in_group, ParallelMode.EXPERT_TENSOR)
+                )
+
+        return groups
+
+
+class Initializer_Expert_Weight_Data(ProcessGroupInitializer):
+    """A ProcessGroupInitializer for common weight's data parallelism.
+    Args:
+        rank (int): The rank of current process.
+        world_size (int): Size of whole communication world.
+        weight_parallel_size (int): Size of model weight parallel.
+        weight_data_parallel_size (int): Size of data parallel for common weight.
+        sequence_parallel_size (int): Size of data sequence parallel.
+        data_parallel_size (int): Size of data parallel.
+        pipeline_parallel_size (int): Size of pipeline parallel.
+        tensor_parallel_size (int): Size of tensor parallel.
+        zero1_parallel_size (int): Size of zero1 parallel.
+        nettest_parallel_size (int): Size of net testing parallel.
+        expert_parallel_size (int): Size of expert parallel.
+        expert_weight_parallel_size (int): Size of expert weight parallel.
+        expert_data_parallel_size (int): Size of expert data parallel.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.ranks_num_per_pp = self.world_size // self.pipeline_parallel_size
+        self.ranks_num_per_dp = self.expert_weight_parallel_size * self.expert_parallel_size
+
+        assert self.world_size % self.pipeline_parallel_size == 0
+        assert self.world_size % (self.pipeline_parallel_size * self.expert_data_parallel_size) == 0
+
+    def init_dist_group(self, use_cpu: bool = False):
+        """Initialize expert parallel groups for isp, and assign local_ranks and groups to each gpu.
+        Returns:
+            list: [(local_rank, group_world_size, process_group, ranks_in_group, mode), ...]:
+                A length 3 list consists of expert parallelism's, expert weight parallelism's
+                and expert data parallelism's information tuple.
+        Example: n=16 ewp=2 ep=4 edp=2 with nopp
+        expert weight groups: [0, 1], [2, 3], [4, 5], [6, 7], [8, 9], [10, 11], [12, 13], [14, 15]
+        expert groups: [0, 2, 4, 6], [1, 3, 5, 7], [8, 10, 12, 14], [9, 11, 13, 15]
+        expert (weight) data groups:[0, 8], [1, 9], [2, 10], [3, 11], [4, 12], [5, 13], [6, 14], [7, 15]
+        """
+
+        expert_parallel_groups = []
+        expert_weight_parallel_groups = []
+        expert_data_parallel_groups = []
+        for i in range(self.pipeline_parallel_size):
+            part_dp_group = []
+            for j in range(self.expert_data_parallel_size):
+                part_dp_group.append(
+                    list(
+                        range(
+                            i * self.ranks_num_per_pp + j * self.ranks_num_per_dp,
+                            i * self.ranks_num_per_pp + (j + 1) * self.ranks_num_per_dp,
+                        )
+                    )
+                )
+            # print(data_parallel_groups)
+            for expert_dp_ranks in zip(*part_dp_group):
+                expert_data_parallel_groups.append(list(expert_dp_ranks))
+
+            for dp_groups in part_dp_group:
+                part_wp_group = []
+                for i in range(0, self.ranks_num_per_dp, self.expert_weight_parallel_size):
+                    part_wp_group.append(dp_groups[i : i + self.expert_weight_parallel_size])
+                # print(part_wp_group)
+                expert_weight_parallel_groups.extend(part_wp_group)
+                for ep_ranks in zip(*part_wp_group):
+                    expert_parallel_groups.append(list(ep_ranks))
+        # print(expert_weight_parallel_groups)
+        # print(expert_parallel_groups)
+        # print(expert_data_parallel_groups)
+        groups = []
+        for ranks in expert_parallel_groups:
+            group = dist.new_group(ranks, timeout=LLM_NCCL_TIMEOUT)
+            if use_cpu:
+                group_cpu = (
+                    dist.new_group(ranks, backend="gloo", timeout=LLM_NCCL_TIMEOUT)
+                    if dist.get_backend() != "gloo"
+                    else group
+                )
+            else:
+                group_cpu = None
+            if self.rank in ranks:
+                local_rank = ranks.index(self.rank)
+                group_world_size = len(ranks)
+                process_group = group
+                cpu_group = group_cpu
+                ranks_in_group = ranks
+                groups.append(
+                    (local_rank, group_world_size, process_group, cpu_group, ranks_in_group, ParallelMode.EXPERT)
+                )
+
+        for ranks in expert_data_parallel_groups:
+            group = dist.new_group(ranks, timeout=LLM_NCCL_TIMEOUT)
+            if use_cpu:
+                group_cpu = (
+                    dist.new_group(ranks, backend="gloo", timeout=LLM_NCCL_TIMEOUT)
+                    if dist.get_backend() != "gloo"
+                    else group
+                )
+            else:
+                group_cpu = None
+            if self.rank in ranks:
+                local_rank = ranks.index(self.rank)
+                group_world_size = len(ranks)
+                process_group = group
+                cpu_group = group_cpu
+                ranks_in_group = ranks
+                groups.append(
+                    (local_rank, group_world_size, process_group, cpu_group, ranks_in_group, ParallelMode.EXPERT_DATA)
+                )
+
+        for ranks in expert_weight_parallel_groups:
+            group = dist.new_group(ranks, timeout=LLM_NCCL_TIMEOUT)
+            if use_cpu:
+                group_cpu = (
+                    dist.new_group(ranks, backend="gloo", timeout=LLM_NCCL_TIMEOUT)
+                    if dist.get_backend() != "gloo"
+                    else group
+                )
+            else:
+                group_cpu = None
+            if self.rank in ranks:
+                local_rank = ranks.index(self.rank)
+                group_world_size = len(ranks)
+                process_group = group
+                cpu_group = group_cpu
+                ranks_in_group = ranks
+                groups.append(
+                    (local_rank, group_world_size, process_group, cpu_group, ranks_in_group, ParallelMode.EXPERT_WEIGHT)
                 )
 
         return groups

@@ -11,7 +11,7 @@ from torch import nn
 from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
 from internlm.core.naive_amp import unwrap_naive_amp
-from internlm.core.parallel.comm.isp import ISPCommunicator
+from internlm.core.parallel.comm.isp import ISPCommunicatorWrapper
 from internlm.model.modules.embedding import Embedding1D
 from internlm.model.modules.linear import ScaleColumnParallelLinear
 from internlm.solver.optimizer.utils import flatten
@@ -23,7 +23,10 @@ class ParamAsyncBcastHandler:
     """
 
     def __init__(
-        self, zero1_mode: ParallelMode, model: Union[nn.Module, nn.ModuleList], isp_communicator: ISPCommunicator = None
+        self,
+        zero1_mode: ParallelMode,
+        model: Union[nn.Module, nn.ModuleList],
+        isp_communicator: ISPCommunicatorWrapper = None,
     ) -> None:
         self._block_to_param: Dict[nn.Module, List[nn.Parameter]] = OrderedDict()
         self._param_to_rank: Dict[nn.Parameter, int] = {}
@@ -98,7 +101,7 @@ class ParamAsyncBcastHandler:
         else:
             self._register_sync_parameters_hook_v2(isp_communicator)
 
-    def _register_sync_parameters_hook(self, isp_communicator: ISPCommunicator = None) -> None:
+    def _register_sync_parameters_hook(self, isp_communicator: ISPCommunicatorWrapper = None) -> None:
         def _pre_forward_hook(model: nn.Module, *args, **kwargs):  # pylint: disable=W0613
             bcast_handles = []
             # gather all required broadcast hanles into a list
@@ -123,7 +126,7 @@ class ParamAsyncBcastHandler:
         if isp_communicator:
             isp_communicator.register_prerequisite_for_forward_prefetch_hooks(_pre_forward_hook)
 
-    def _register_sync_parameters_hook_v2(self, isp_communicator: ISPCommunicator = None) -> None:
+    def _register_sync_parameters_hook_v2(self, isp_communicator: ISPCommunicatorWrapper = None) -> None:
         def _pre_forward_hook(model: nn.Module, *args, **kwargs):  # pylint: disable=W0613
             # For each block, wait corresponding all_gather handle to be completed
             # For each all_gather handle, several consecutive blocks may be involved
