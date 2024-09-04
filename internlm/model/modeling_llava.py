@@ -7,6 +7,7 @@ from internlm.core.context import ParallelMode
 from internlm.core.context.parallel_context import global_context as gpc
 from internlm.core.naive_amp import set_output_attr_to_module
 from internlm.initialize.initialize_tensor import normal_, uniform_
+from internlm.model.base_model import BaseModel
 from internlm.model.llava.clip_builder import build_vision_tower
 from internlm.model.llava.projector_builder import build_vision_projector
 from internlm.model.modeling_llama import Llama2Decoder
@@ -18,7 +19,7 @@ from internlm.utils.logger import get_logger
 logger = get_logger(__file__)
 
 
-class Llava(nn.Module):
+class Llava(BaseModel):
     """
     1D Packed Flash Llava.
 
@@ -233,3 +234,11 @@ class Llava(nn.Module):
             hidden_states = self.output(hidden_states)
 
         return hidden_states
+
+    @staticmethod
+    def load_hf_weights(folder: str, model: nn.Module) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    def convert_internevo2hf_weights(src: str, tgt: str) -> None:
+        raise NotImplementedError

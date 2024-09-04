@@ -3,6 +3,7 @@
 
 # adopted from https://github.com/hpcaitech/ColossalAI/blob/main/colossalai/engine
 
+import queue
 from contextlib import contextmanager
 from typing import Callable, List, Optional, Tuple, Union
 
@@ -21,6 +22,7 @@ from internlm.utils.common import (
     move_to_device,
 )
 from internlm.utils.logger import get_logger
+from internlm.utils.parallel import is_using_isp
 from internlm.utils.timeout import llm_timeout
 
 from .base_scheduler import BaseScheduler
@@ -106,6 +108,40 @@ def switch_optimizer_grad_sync_skip_mode(optimizer, skip: bool = True):
         yield
     finally:
         optimizer.skip_grad_reduce = prev_mode
+
+
+class WeightGradStore:
+    """
+    When using zero bubble pp, WeightGradStore is used to store the args and func for computating weight grad.
+    """
+
+    weight_grad_queue = queue.Queue()
+
+    @classmethod
+    def size(cls):
+        return cls.weight_grad_queue.qsize()
+
+    @classmethod
+    def put(cls, weight, bias, input_tensor, grad_output, has_d_bias, grad_compute_func, *args):
+        # Store the weight gradient computation of linear layers.
+        cls.weight_grad_queue.put((weight, bias, input_tensor, grad_output, has_d_bias, grad_compute_func, *args))
+
+    @classmethod
+    def pop(cls):
+        # Run computation for a single W.
+        assert cls.weight_grad_queue.qsize() > 0
+        weight, bias, input_tensor, grad_output, has_d_bias, grad_compute_func, *args = cls.weight_grad_queue.get()
+        grad_weight, grad_bias = grad_compute_func(input_tensor, grad_output, has_d_bias)
+        if is_using_isp():
+            isp_grad_hook = args[0]
+            grad_weight, _ = isp_grad_hook(grad_weight, async_op=False, is_bias=False)
+            if grad_bias is not None:
+                grad_bias, _ = isp_grad_hook(grad_bias, async_op=False, is_bias=True)
+
+        # Gradient Accumulation
+        weight.grad = weight.grad + grad_weight if weight.grad is not None else grad_weight
+        if has_d_bias:
+            bias.grad = bias.grad + grad_bias if bias.grad is not None else grad_bias
 
 
 class PipelineScheduler(BaseScheduler):
@@ -702,6 +738,259 @@ class PipelineScheduler(BaseScheduler):
             return output, label, accum_loss, accum_moe_loss
         else:
             return output, label, accum_loss
+
+
+class ZeroBubblePipelineScheduler(PipelineScheduler):
+    """
+    A helper schedule class for pipeline parallelism running environment.
+    It uses non-interleaved 1F1B strategy. Other properties are similar as
+    :class:`NonPipelineSchedule`.
+
+    Args:
+        num_microbatches (int): The number of microbatches.
+        dtype (torch.dtype): Type of data. torch.float by default.
+        data_process_func (Callable, optional):
+            The post processing function which receives a micro batch of data, and it will be executed
+            in `load_micro_batch`.
+        tensor_shape (torch.Size, optional): Specified shape in pipeline communication.
+        scatter_gather_tensors (bool, optional):
+            If set to `True`, communication will be reduced over pipeline when using 1D tensor parallelization.
+        scheduler_hooks (Optional[List[SchedulerHook]], optional): List of scheduler hooks.
+    """
+
+    def __init__(
+        self,
+        num_microbatches: int,
+        dtype: torch.dtype = torch.float,
+        data_process_func: Callable = None,
+        tensor_shape: Union[torch.Size, List[int], Tuple[int]] = None,
+        scatter_gather_tensors: bool = False,
+        scheduler_hooks: Optional[List[SchedulerHook]] = None,
+    ):
+        super().__init__(
+            num_microbatches,
+            dtype=dtype,
+            data_process_func=data_process_func,
+            tensor_shape=tensor_shape,
+            scatter_gather_tensors=scatter_gather_tensors,
+            scheduler_hooks=scheduler_hooks,
+        )
+
+    def _forward_backward_step(self, engine, return_loss=True, return_output_label=True):
+        """
+        This function schedules the forward and backward computation of microbatches in the pipeline in a 1F1B manner.
+        It consists of three stages: warmup, 1F1B, and cooldown.
+
+        1. Warmup Stage:
+        The warmup stage performs num_warmup forward microsteps. The calculation of num_warmup is the pipeline length
+        minus the rank of the current pipeline minus 1. For each microstep, it receives data as input from the previous
+        stage, performs the forward computation, and then sends the result to the next stage.
+
+        2. 1F1B Stage:
+        The 1F1B stage consists of pairs of forward and backward microsteps. It performs num_1f1b_micropairs iterations,
+        where num_1f1b_micropairs is calculated as the total number of microbatches minus the number of microbatches in
+        the warmup stage. In each iteration, it first performs a forward computation, sends the result to the next
+        stage, receives input for the backward computation, performs the backward computation, and finally sends the
+        result to the previous stage to receive input for the next forward computation.
+
+        3. Cooldown Stage:
+        The cooldown stage performs the same number of iterations as the warmup stage. In each iteration, it receives
+        input for the backward computation, performs the backward computation, and finally sends the result to the
+        previous stage.
+
+        There are two special cases to consider:
+        1. The first stage of the pipeline does not need to receive forward input or send backward output. The last
+        stage does not need to send forward output or receive backward input.
+        2. Pay attention to the communication between stages and use additional communication to bridge the gap.
+
+        Args:
+            engine (Engine): The engine used for computation.
+            return_loss (bool, optional): Whether to return the accumulated loss.
+            return_output_label (bool, optional): Whether to return outputs and labels.
+
+        Returns:
+            Tuple[Union[torch.Tensor, None], Union[torch.Tensor, None], Union[torch.Tensor, None]]:
+            The output, label, and accumulated loss.
+        """
+
+        num_warmup_microsteps = (
+            gpc.get_world_size(ParallelMode.PIPELINE) - gpc.get_local_rank(ParallelMode.PIPELINE) - 1
+        )
+        num_warmup_microsteps = min(num_warmup_microsteps, self.num_microbatches)
+        num_1f1b_micropairs = self.num_microbatches - num_warmup_microsteps
+
+        # Input, output tensors only need to be saved when doing backward passes
+        input_objs = []
+        output_objs = []
+        moe_losses = []
+        return_tensors = []
+        accum_loss = (
+            torch.zeros(1, device=get_current_device())
+            if return_loss and gpc.is_pipeline_last_stage(ignore_virtual=True)
+            else None
+        )
+        accum_moe_loss = torch.zeros(1, device=get_current_device())
+
+        # Used for tensor meta information communication
+        forward_recv_shapes = self.tensor_shape
+        backward_recv_shapes = None
+        need_forward_meta = self.tensor_shape is None
+
+        f_times = 0
+        # Run warmup forward passes.
+        for i in range(num_warmup_microsteps):
+            # Receive the input from the previous stage
+            if not gpc.is_first_rank(ParallelMode.PIPELINE):
+                if forward_recv_shapes is None:
+                    forward_recv_shapes = comm.recv_obj_meta()
+                input_obj = comm.recv_forward(
+                    forward_recv_shapes,
+                    dtype=self.dtype,
+                    scatter_gather_tensors=self.scatter_gather_tensors,
+                )
+            else:
+                input_obj = None
+
+            # Perform forward computation
+            output_obj, moe_loss = self._forward_step(
+                engine,
+                input_obj,
+                return_tensors,
+                return_output_label=return_output_label,
+                accum_loss=accum_loss,
+                accum_moe_loss=accum_moe_loss,
+            )
+            f_times += 1
+
+            if not gpc.is_last_rank(ParallelMode.PIPELINE):
+                if isinstance(output_obj, torch.Tensor):
+                    backward_recv_shapes = output_obj.shape
+                else:
+                    backward_recv_shapes = [out_tensor.shape for out_tensor in output_obj]
+
+                if need_forward_meta:
+                    comm.send_obj_meta(output_obj)
+                    need_forward_meta = False  # send only once.
+
+            # Send the output of forward computation of this pipeline stage to the next pipeline stage as input for
+            # forward computation
+            if not gpc.is_last_rank(ParallelMode.PIPELINE):
+                assert output_obj.dtype == self.dtype
+                comm.send_forward(output_obj, scatter_gather_tensors=self.scatter_gather_tensors)
+
+            input_objs.append(input_obj)
+            output_objs.append(output_obj)
+            moe_losses.append(moe_loss)
+        # Before running 1F1B, need to receive first forward tensor.
+        # If all microbatches are run in warmup / cooldown phase, then no need to
+        # receive this tensor here.
+        if num_1f1b_micropairs > 0:
+            if not gpc.is_first_rank(ParallelMode.PIPELINE):
+                if forward_recv_shapes is None:
+                    forward_recv_shapes = comm.recv_obj_meta()
+                input_obj = comm.recv_forward(
+                    forward_recv_shapes,
+                    dtype=self.dtype,
+                    scatter_gather_tensors=self.scatter_gather_tensors,
+                )
+            else:
+                input_obj = None
+
+        # Run 1F1B in steady state.
+        for i in range(num_1f1b_micropairs):
+            # Perform forward computation
+            output_obj, moe_loss = self._forward_step(
+                engine,
+                input_obj,
+                return_tensors,
+                return_output_label=return_output_label,
+                accum_loss=accum_loss,
+                accum_moe_loss=accum_moe_loss,
+            )
+            f_times += 1
+
+            if gpc.is_last_rank(ParallelMode.PIPELINE):
+                output_obj_grad = None
+            else:
+                assert output_obj.dtype == self.dtype
+                output_obj_grad = comm.send_forward_recv_backward(
+                    output_obj,
+                    backward_recv_shapes,
+                    dtype=self.dtype,
+                    scatter_gather_tensors=self.scatter_gather_tensors,
+                )
+
+            # Add input_obj and output_obj to end of list.
+            input_objs.append(input_obj)
+            output_objs.append(output_obj)
+            moe_losses.append(moe_loss)
+
+            # Pop output_obj and output_obj from the start of the list for
+            # the backward pass.
+            input_obj = input_objs.pop(0)
+            output_obj = output_objs.pop(0)
+            moe_loss = moe_losses.pop(0)
+
+            input_obj_grad = self._backward_step(engine, i, input_obj, output_obj, output_obj_grad, moe_loss)
+
+            if i == (num_1f1b_micropairs - 1):
+                input_obj = None
+                if not gpc.is_first_rank(ParallelMode.PIPELINE):
+                    comm.send_backward(
+                        input_obj_grad,
+                        scatter_gather_tensors=self.scatter_gather_tensors,
+                    )
+            else:
+                if gpc.is_first_rank(ParallelMode.PIPELINE):
+                    input_obj = None
+                else:
+                    input_obj = comm.send_backward_recv_forward(
+                        input_obj_grad,
+                        forward_recv_shapes,
+                        dtype=self.dtype,
+                        scatter_gather_tensors=self.scatter_gather_tensors,
+                    )
+
+            if i >= gpc.get_local_rank(ParallelMode.PIPELINE):
+                WeightGradStore.pop()
+
+        # Run cooldown backward passes.
+        for i in range(num_warmup_microsteps):
+            input_obj = input_objs.pop(0)
+            output_obj = output_objs.pop(0)
+            moe_loss = moe_losses.pop(0)
+
+            if not gpc.is_last_rank(ParallelMode.PIPELINE):
+                output_obj_grad = comm.recv_backward(
+                    backward_recv_shapes,
+                    dtype=self.dtype,
+                    scatter_gather_tensors=self.scatter_gather_tensors,
+                )
+            else:
+                output_obj_grad = None
+
+            input_obj_grad = self._backward_step(
+                engine, num_1f1b_micropairs + i, input_obj, output_obj, output_obj_grad, moe_loss
+            )
+
+            if not gpc.is_first_rank(ParallelMode.PIPELINE):
+                comm.send_backward(input_obj_grad, scatter_gather_tensors=self.scatter_gather_tensors)
+
+            if WeightGradStore.size() > 0:
+                WeightGradStore.pop()
+
+        while WeightGradStore.size() > 0:
+            WeightGradStore.pop()
+
+        output, label = pack_return_tensors(return_tensors) if len(return_tensors) > 0 else (None, None)
+
+        if hasattr(gpc.config.model, "num_experts") and gpc.config.model.num_experts > 1:
+            dist.all_reduce(accum_moe_loss, group=gpc.get_group(ParallelMode.PIPELINE))
+
+        if accum_loss is not None:
+            accum_loss += accum_moe_loss
+
+        return output, label, accum_loss, accum_moe_loss
 
 
 class InterleavedPipelineScheduler(PipelineScheduler):

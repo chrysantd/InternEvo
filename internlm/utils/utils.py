@@ -42,17 +42,16 @@ class CuSeqlenType(Enum):
 
 
 class ModelType(Enum):
-    HF = 1
-    INTERNLM = 2
-    INTERNLM2_PUBLIC = 3
-    LLAMA2 = 4
-    INTERNLM_MoE = 5
-    LLAVA = 6
-    GPT256B = 7
+    INTERNLM = 1
+    INTERNLM2_PUBLIC = 2
+    LLAMA2 = 3
+    INTERNLM_MoE = 4
+    LLAVA = 5
+    GPT256B = 6
 
 
 class DataType(Enum):
-    hf = 1
+    streaming = 1
     tokenized = 2
 
 

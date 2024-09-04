@@ -22,13 +22,15 @@ LOAD_CKPT_FOLDER = "local:llm_ckpts/49"
 CHECKPOINT_EVERY = 50
 ckpt = dict(
     enable_save_ckpt=False,  # enable ckpt save.
+    enable_internevo2hf_ckpt=False, # enable ckpt save for huggingface format.
     save_ckpt_folder=SAVE_CKPT_FOLDER,  # Path to save training ckpt.
     # load_ckpt_folder= dict(path=MODEL_ONLY_FOLDER, content=["model"], ckpt_type="normal"),
     load_ckpt_folder="local:llm_ckpts/",
     # 'load_ckpt_info' setting guide:
     # 1. the 'path' indicate ckpt path,
     # 2. the 'content‘ means what states will be loaded, support: "model", "sampler", "optimizer", "scheduler", "all"
-    # 3. the ’ckpt_type‘ means the type of checkpoint to be loaded, support: "internevo", "llama", "hf_llama".
+    # 3. the ’ckpt_type‘ means the type of checkpoint to be loaded, support: "internevo", "hf", or other custom-defined 
+    # load function such as "llama"
     load_ckpt_info=dict(path=MODEL_ONLY_FOLDER, content=("model",), ckpt_type="internevo"),
     # 'auto_resume' is designed to automatically load the latest checkpoint from 'save_ckpt_folder' when encountering
     # training interruptions/hangs caused by hardware failures, using a scheduling system (such as k8s/slurm)
@@ -181,9 +183,10 @@ tensor parallel (dict):
         fsp: tensor parallel by flash-attn with sequence parallel, sequence parallel size = tensor parallel size.
         isp: customed intern sequence parallel without tensor parallel, can be used with weight parallel.
 pipeline parallel (dict):
-    1. size: int, the size of pipeline parallel.
+    1. size: int, the size of pipeline parallel (Default is 1F1B).
     2. interleaved_overlap: bool, enable/disable communication overlap when using interleaved pipeline scheduler,
         defaults to False.
+    3. zero_bubble: bool, enable/disable zero bubble pipeline parallelism (ZB-H1), defaults to False.
 weight parallel (dict):
     1. size: int, the size of weight parallel.
     2. overlap: bool, enable/disable all_gather/reduce_scatter communication overlap, defaults to False.
@@ -192,7 +195,7 @@ weight parallel (dict):
 parallel = dict(
     zero1=dict(size=-1),
     tensor=dict(size=1, mode="mtp"),
-    pipeline=dict(size=1, interleaved_overlap=True),
+    pipeline=dict(size=1, interleaved_overlap=True, zero_bubble=False),
     weight=dict(size=1, overlap=True, memory_pool=True),
 )
 

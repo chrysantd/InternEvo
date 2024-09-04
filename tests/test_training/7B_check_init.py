@@ -32,7 +32,7 @@ ckpt = dict(
     # 1. the 'path' indicate ckpt path,
     # 2. the 'content‘ means what states will be loaded, support: "model", "sampler", "optimizer", "scheduler", "all"
     # 3. the ’ckpt_type‘ means the type of checkpoint to be loaded, now only 'normal' type is supported.
-    # load_ckpt_info=dict(path=MODEL_ONLY_FOLDER, content=("all",), ckpt_type="internlm"),
+    # load_ckpt_info=dict(path=MODEL_ONLY_FOLDER, content=("all",), ckpt_type="internevo"),
     # 'auto_resume' is designed to automatically load the latest checkpoint from 'save_ckpt_folder' when encountering
     # training interruptions/hangs caused by hardware failures, using a scheduling system (such as k8s/slurm)
     # with an automatic restart mechanism upon training reboot.
@@ -144,18 +144,7 @@ model = dict(
     use_flash_attn=True,
     num_chunks=1,  # if num_chunks > 1, interleaved pipeline scheduler is used.
 )
-"""
-zero1 parallel:
-    1. if zero1 <= 0, The size of the zero process group is equal to the size of the dp process group,
-        so parameters will be divided within the range of dp.
-    2. if zero1 == 1, zero is not used, and all dp groups retain the full amount of model parameters.
-    3. zero1 > 1 and zero1 <= dp world size, the world size of zero is a subset of dp world size.
-        For smaller models, it is usually a better choice to split the parameters within nodes with a setting <= 8.
-pipeline parallel (dict):
-    1. size: int, the size of pipeline parallel.
-    2. interleaved_overlap: bool, enable/disable communication overlap when using interleaved pipeline scheduler.
-tensor parallel: tensor parallel size, usually the number of GPUs per node.
-"""
+
 parallel = dict(
     zero1=dict(size=-1),
     tensor=dict(size=2, mode="mtp"),
