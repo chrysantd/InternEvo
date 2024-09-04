@@ -3,6 +3,7 @@
 
 from typing import Callable
 
+from internlm.model.modeling_gpt import GPTMoE
 from internlm.model.modeling_internlm import InternLM1
 from internlm.model.modeling_internlm2 import InternLM2
 from internlm.model.modeling_llama import Llama2
@@ -83,3 +84,4 @@ def register_model_initializer() -> None:
     model_initializer.register_module(ModelType.LLAMA2.name, Llama2)
     model_initializer.register_module(ModelType.INTERNLM_MoE.name, Internlm1MoE)
     model_initializer.register_module(ModelType.LLAVA.name, Llava)
+    model_initializer.register_module(ModelType.GPT256B.name, GPTMoE)

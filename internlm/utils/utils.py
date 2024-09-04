@@ -48,6 +48,7 @@ class ModelType(Enum):
     LLAMA2 = 4
     INTERNLM_MoE = 5
     LLAVA = 6
+    GPT256B = 7
 
 
 class DataType(Enum):

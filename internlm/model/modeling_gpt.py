@@ -28,7 +28,7 @@ from internlm.utils.logger import get_logger
 logger = get_logger(__file__)
 
 
-class Internlm1MoEDecoder(nn.Module):
+class GPTMoEDecoder(nn.Module):
     """
     InternLM1 MoE Decoder Layer.
 
@@ -243,7 +243,7 @@ class Internlm1MoEDecoder(nn.Module):
         return hidden_states + residual, moe_loss
 
 
-class Internlm1MoE(nn.Module):
+class GPTMoE(nn.Module):
     """
     InternLM1 MoE.
 
@@ -328,7 +328,7 @@ class Internlm1MoE(nn.Module):
         self.embed_grad_scale = embed_grad_scale
         self.blocks = nn.ModuleList(
             [
-                Internlm1MoEDecoder(
+                GPTMoEDecoder(
                     hidden_size=hidden_size,
                     num_attention_heads=num_attention_heads,
                     mlp_ratio=mlp_ratio,
