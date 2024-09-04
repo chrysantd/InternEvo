@@ -198,6 +198,7 @@ parallel = dict(
     pipeline=dict(size=1, interleaved_overlap=True),
     weight=dict(size=1, overlap=True, memory_pool=True),
     expert=dict(size=-1, no_tp=False),
+    expert_weight=dict(size=1, overlap=True, memory_pool=True),
 )
 
 cudnn_deterministic = False

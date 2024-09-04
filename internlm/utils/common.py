@@ -7,6 +7,7 @@ import os
 import random
 import threading
 from abc import ABC, abstractmethod
+from collections import ChainMap
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Union
@@ -303,3 +304,17 @@ class SchedulerHook(ABC):
     @abstractmethod
     def post_helper_func(self, scheduler, outputs, label) -> None:
         """A post helper function"""
+
+
+class UniqueChainMap(ChainMap):
+    """
+    UniqueChainMap updates the first mapping containing a given key when assigning a value.
+    If the key is not found, it adds the key-value pair to the first mapping.
+    """
+
+    def __setitem__(self, key, value):
+        for mapping in self.maps:
+            if key in mapping:
+                mapping[key] = value
+                return
+        self.maps[0][key] = value

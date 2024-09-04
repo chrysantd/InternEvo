@@ -21,8 +21,9 @@ from internlm.core.context.parallel_context import (
     IS_WEIGHT_EXPERT_DATA_PARALLEL,
     IS_WEIGHT_ZERO_PARALLEL,
 )
+from internlm.core.parallel.comm.isp import ISPCommunicatorWrapper
 from internlm.core.parallel.comm.zero import ParamAsyncBcastHandler
-from internlm.model.modules.utils import is_gate_param
+from internlm.model.modules.utils import is_gate_param, is_moe_param
 from internlm.monitor import send_alert_message
 from internlm.solver.optimizer.store import (
     BucketStore,
@@ -66,7 +67,7 @@ class HybridZeroOptimizer(BaseOptimizer):
         grad_scal_cfg: Config = None,
         zero_cfg: Config = None,
         param_bcast_sync_handler: ParamAsyncBcastHandler = None,
-        isp_communicator=None,
+        isp_communicator: ISPCommunicatorWrapper = None,
     ):
         # DynamicGradScaler related args
         if gpc.config.model.dtype is torch.float32:
@@ -376,10 +377,17 @@ class HybridZeroOptimizer(BaseOptimizer):
 
                     # we should not only register for parameters which have isp_reduce_scatter_name attr.
                     # we must keep up with reduce_grad_hook.
-                    if (
-                        self._isp_communicator
-                        and self._isp_communicator.overlap
-                        and gpc.config.parallel.weight.size > 1
+                    if self._isp_communicator and (
+                        (
+                            is_moe_param(param)
+                            and gpc.config.parallel.expert_weight.size > 1
+                            and gpc.config.parallel.expert_weight.overlap
+                        )
+                        or (
+                            not is_moe_param(param)
+                            and gpc.config.parallel.weight.size > 1
+                            and gpc.config.parallel.weight.overlap
+                        )
                     ):
                         if hasattr(param, "evo_tensor"):
                             param.register_post_accumulate_grad_hook(accum_grad_hook)
