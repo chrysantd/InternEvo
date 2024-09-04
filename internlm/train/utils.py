@@ -7,6 +7,9 @@ from internlm.core.context.parallel_context import ParallelMode
 from internlm.core.context.parallel_context import global_context as gpc
 from internlm.core.naive_amp import unwrap_naive_amp
 from internlm.model.modules.utils import is_moe_param
+from internlm.utils.logger import get_logger
+
+logger = get_logger(__file__)
 
 
 def split_params_into_different_groups_for_optimizer(
@@ -94,3 +97,20 @@ def map_param_block(model):
             else:
                 for param in children.parameters():
                     setattr(param, "block_name", name)
+
+
+def timeout_input(printout, default, timeout=None, interactive=True):
+    if not interactive:
+        return default
+    import select
+    import sys
+
+    if gpc.is_rank_for_log():
+        logger.info(printout)
+
+    i, _, _ = select.select([sys.stdin], [], [], timeout)
+    if i:
+        msg = sys.stdin.readline().strip()
+        return default if len(msg) == 0 else msg
+    else:
+        return default

@@ -80,7 +80,7 @@ class SPFusedDenseFunc(torch.autograd.Function):
         output, _ = communicator.output_hook(output, async_op=False)
 
         saved_x = None if ctx.compute_weight_gradient is False else total_x if communicator.save_total_input() else x
-        ctx.save_for_backward(saved_x, weight)
+        ctx.save_for_backward(saved_x, weight, bias)
 
         return output if not return_residual else (output, x)
 
@@ -98,7 +98,7 @@ class SPFusedDenseFunc(torch.autograd.Function):
             (grad_input,) = args
             grad_input = grad_input.contiguous()
 
-        x, weight = ctx.saved_tensors
+        x, weight, bias = ctx.saved_tensors
 
         # parallel strategy-specific communication callback 1-2.
         # see more details in the communicator for different parallel strategies.
@@ -133,7 +133,16 @@ class SPFusedDenseFunc(torch.autograd.Function):
             handle_x.wait()
 
             x = x.reshape(batch_dim, x.shape[-1])
-            grad_weight, grad_bias = linear_backward_op(x, grad_output, ctx.needs_input_grad[2])
+            if gpc.is_using_parallel_mode(ParallelMode.PIPELINE) and gpc.config.parallel["pipeline"].get(
+                "zero_bubble", False
+            ):
+                from internlm.core.scheduler.pipeline_scheduler import WeightGradStore
+
+                WeightGradStore.put(weight, bias, x, grad_output, ctx.needs_input_grad[2], linear_backward_op)
+                grad_weight, grad_bias = None, None
+            else:
+                grad_weight, grad_bias = linear_backward_op(x, grad_output, ctx.needs_input_grad[2])
+
         else:
             grad_weight = None
             grad_bias = grad_output if ctx.needs_input_grad[2] else None
@@ -191,8 +200,14 @@ class WPFusedDenseFunc(torch.autograd.Function):
         del total_weight
         del total_bias
 
+        # parallel strategy-specific communication callback 2.
+        # see more details in the communicator for different parallel strategies.
+        # gather seq dim when head parallel_output is False
+        if hasattr(communicator, "output_hook"):
+            output, _ = communicator.output_hook(output, async_op=False)
+
         saved_x = None if ctx.compute_weight_gradient is False else x
-        ctx.save_for_backward(saved_x, weight)
+        ctx.save_for_backward(saved_x, weight, bias)
 
         return output if not return_residual else (output, x)
 
@@ -201,7 +216,12 @@ class WPFusedDenseFunc(torch.autograd.Function):
     def backward(ctx, grad_output, *args):
         module: nn.Module = ctx.module
         communicator: WPCommunicator = ctx.communicator
-        x, weight = ctx.saved_tensors
+        x, weight, bias = ctx.saved_tensors
+
+        # parallel strategy-specific communication callback 3.
+        # see more details in the communicator for different parallel strategies.
+        if hasattr(communicator, "grad_output_hook"):
+            grad_output, _ = communicator.grad_output_hook(grad_output, async_op=False)
 
         grad_output = grad_output.contiguous()
         if ctx.return_residual:
@@ -214,22 +234,35 @@ class WPFusedDenseFunc(torch.autograd.Function):
 
         total_weight = communicator.weight_hook(weight, module=module)
 
+        is_using_ZB = gpc.is_using_parallel_mode(ParallelMode.PIPELINE) and gpc.config.parallel["pipeline"].get(
+            "zero_bubble", False
+        )
+
         # compute weight grad
         if ctx.needs_input_grad[1]:
             assert ctx.compute_weight_gradient
-            grad_weight, grad_bias = linear_backward_op(
-                x.reshape(batch_dim, x.shape[-1]),
-                grad_output,
-                ctx.needs_input_grad[2],
-            )
+            x = x.reshape(batch_dim, x.shape[-1])
+            if is_using_ZB:
+                from internlm.core.scheduler.pipeline_scheduler import WeightGradStore
 
-            grad_weight, grad_weight_sync = communicator.grad_hook(
-                grad_weight, async_op=True, module=module, is_bias=False
-            )
-            if grad_bias is not None:
-                grad_bias, grad_bias_sync = communicator.grad_hook(
-                    grad_bias, async_op=True, module=module, is_bias=True
+                WeightGradStore.put(
+                    weight, bias, x, grad_output, ctx.needs_input_grad[2], linear_backward_op, communicator.grad_hook
                 )
+                grad_weight, grad_bias = None, None
+            else:
+                grad_weight, grad_bias = linear_backward_op(
+                    x,
+                    grad_output,
+                    ctx.needs_input_grad[2],
+                )
+
+                grad_weight, grad_weight_sync = communicator.grad_hook(
+                    grad_weight, async_op=True, module=module, is_bias=False
+                )
+                if grad_bias is not None:
+                    grad_bias, grad_bias_sync = communicator.grad_hook(
+                        grad_bias, async_op=True, module=module, is_bias=True
+                    )
         else:
             grad_weight = None
             grad_bias = grad_output if ctx.needs_input_grad[2] else None
@@ -249,7 +282,7 @@ class WPFusedDenseFunc(torch.autograd.Function):
 
         del total_weight
 
-        if ctx.needs_input_grad[1]:
+        if ctx.needs_input_grad[1] and not is_using_ZB:
             grad_weight_sync.wait()
             if grad_bias is not None:
                 grad_bias_sync.wait()

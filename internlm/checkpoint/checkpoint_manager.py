@@ -16,6 +16,8 @@ from internlm.initialize.legacy.launch import (
     auto_resume_sanity_check,
     ckpt_info_sanity_check,
 )
+from internlm.model.base_model import BaseModel
+from internlm.model.registry import model_initializer
 from internlm.monitor import send_alert_message
 from internlm.solver.optimizer import HybridZeroOptimizer, HybridZeroOptimizer_v2
 from internlm.utils.common import get_current_device
@@ -257,6 +259,7 @@ class CheckpointManager:
             self.async_upload_tmp_folder = None
 
         self.async_upload = get_config_value(ckpt_config, "async_upload", False)
+        self.enable_internevo2hf_ckpt = get_config_value(ckpt_config, "enable_internevo2hf_ckpt", False)
 
         use_processpool = self.save_ckpt_folder is not None and (
             self.save_ckpt_folder.startswith("volc:") or self.save_ckpt_folder.startswith("oss2:")
@@ -278,10 +281,21 @@ class CheckpointManager:
         self.model_config = model_config
         self.model_config_file = model_config_file
 
-        # Register defalut internlm ckpt load type.
+        # Register pre-defined ckpt load type.
         self.defalut_load_type_func = {
             k: partial(try_load_internlm_ckpt_func, func=v) for k, v in LOAD_FUNC_DICT.items()
         }
+        # Register huggingface ckpt load type
+        if isinstance(model, BaseModel):
+            self.defalut_load_type_func.update(
+                {
+                    "hf": partial(
+                        try_load_internlm_ckpt_func,
+                        func=model_initializer.get_module(module_name=gpc.config.model_type).load_hf_weights,
+                    )
+                }
+            )
+
         for ckpt_load_type, func in self.defalut_load_type_func.items():
             CheckpointLoadMethod.register_ckpt_load_type(ckpt_load_type, func)
 
@@ -427,6 +441,25 @@ now step_count is {train_state.step_count}",
                 model_config=self.model_config,
                 model_config_file=self.model_config_file,
             )
+
+            if (
+                isinstance(self.model, BaseModel)
+                and self.enable_internevo2hf_ckpt
+                and save_type == CheckpointSaveType.NORMAL_CHECKPOINT
+                and gpc.is_rank_for_log()
+            ):
+                # convert internevo2hf checkpoint
+                save_hf_ckpt_folder = os.path.join(self.save_ckpt_folder, f"{str(train_state.step_count)}_hf")
+                logger.info(
+                    f"Start to convert internevo2hf checkpoint from {save_ckpt_folder} to {save_hf_ckpt_folder}."
+                )
+                model_initializer.get_module(module_name=gpc.config.model_type).convert_internevo2hf_weights(
+                    src=save_ckpt_folder, tgt=save_hf_ckpt_folder
+                )
+                logger.info(
+                    f"Finish to convert internevo2hf checkpoint from {save_ckpt_folder} to {save_hf_ckpt_folder}."
+                )
+                torch.distributed.barrier()
 
         return now_break
 

@@ -82,7 +82,7 @@ def args_sanity_check():
         gpc.config.parallel._add_item("zero1", dict(size=zero1_size, fsdp=False))
 
     if "pipeline" not in gpc.config.parallel:
-        gpc.config.parallel._add_item("pipeline", dict(size=1, interleaved_overlap=False))
+        gpc.config.parallel._add_item("pipeline", dict(size=1, interleaved_overlap=False, zero_bubble=False))
 
     if "tensor" not in gpc.config.parallel:
         gpc.config.parallel._add_item("tensor", dict(size=1, mode=TensorParallelMode.mtp.name))
@@ -398,7 +398,11 @@ def args_sanity_check():
         assert (
             gpc.config.data.use_packed_dataset is False
         ), "only unpacked data is supported when tensor parallel mode is isp and accelerator type is NPU or DIPU"
-    else:
+
+    if internlm_accelerator.get_accelerator_backend() in [
+        AcceleratorType.NPU,
+        AcceleratorType.DIPU,
+    ]:
         assert (
             gpc.config.model.use_flash_attn == gpc.config.data.use_packed_dataset
         ), "use_packed_dataset should be set same value as use_flash_attn"
@@ -463,6 +467,18 @@ def args_sanity_check():
     elif optim_ckpt.use_split_tensor_optim and "all_gather_size" not in optim_ckpt:
         optim_ckpt._add_item("all_gather_size", 512 * 1024 * 1024)
 
+    if gpc.config.parallel["pipeline"].get("zero_bubble", False):
+        assert (
+            not optim_ckpt.overlap_sync_grad
+        ), "When using zero_bubble pipeline parallelism, overlap_sync_grad must be false"
+        assert (
+            getattr(gpc.config.model, "num_chunks", 1) == 1
+        ), "zero_bubble pp and interleaved pp cannot be used at the same time"
+        if gpc.config.parallel["tensor"]["mode"] == "isp":
+            assert not gpc.config.parallel["weight"].get(
+                "overlap", False
+            ), "When using zero_bubble pipeline parallelism, isp_overlap must be false"
+
     if gpc.is_rank_for_log():
         logger.info(
             f"overlap_sync_grad:{optim_ckpt.overlap_sync_grad}, overlap_sync_param:{optim_ckpt.overlap_sync_param}"
@@ -476,6 +492,8 @@ def args_sanity_check():
 
     if gpc.config.parallel.expert.get("no_tp", None) is None:
         gpc.config.parallel.expert.no_tp = False
+    if "selective_checkpoint" not in gpc.config:
+        gpc.config._add_item("selective_checkpoint", False)
 
     # moe not support overlap and zero1.5 for now
     if gpc.config.model.get("num_experts", 1) > 1:
@@ -487,6 +505,37 @@ def args_sanity_check():
             -1,
             gpc.get_world_size(ParallelMode.DATA),
         ), "moe only support zero1, set zero1=dict(size=-1,...) can fix this"
+
+    # sequence_2D
+    if "sequence_2D" not in gpc.config.parallel:
+        gpc.config.parallel._add_item(
+            "sequence_2D",
+            {
+                "enable": False,
+                "head_size": 1,
+                "context_size": 1,
+                "window_size": 1,
+                "device_placement_strategy": {"head_first": True, "interleaved": False},
+            },
+        )
+    else:
+        if gpc.config.parallel.sequence_2D.enable is True:
+            parallel_cfg = gpc.config.parallel
+            assert (
+                parallel_cfg.sequence_2D.head_size * parallel_cfg.sequence_2D.context_size == parallel_cfg.tensor.size
+            ), "the head_size * context_size should be equal to the tensor size."
+
+            if (
+                parallel_cfg.sequence_2D.device_placement_strategy.head_first is True
+                and parallel_cfg.sequence_2D.head_size > 1
+            ):
+                assert (
+                    parallel_cfg.sequence_2D.device_placement_strategy.interleaved is False
+                ), "if head_first is True, the interleaved should be False."
+
+            assert (
+                gpc.config.data.use_packed_dataset is False
+            ), "only unpacked data is supported when using 2D sequence parallel."
 
 
 def launch(

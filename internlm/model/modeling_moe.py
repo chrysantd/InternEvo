@@ -11,6 +11,7 @@ from internlm.core.context import ParallelMode
 from internlm.core.context.parallel_context import global_context as gpc
 from internlm.core.naive_amp import set_fp32_attr_to_module
 from internlm.initialize.initialize_tensor import normal_, scaled_init_method_normal
+from internlm.model.base_model import BaseModel
 from internlm.model.modules.embedding import Embedding1D
 from internlm.model.modules.linear import new_linear
 from internlm.model.modules.mha import MHA
@@ -238,7 +239,7 @@ class Internlm1MoEDecoder(nn.Module):
         return hidden_states + residual, moe_loss
 
 
-class Internlm1MoE(nn.Module):
+class Internlm1MoE(BaseModel):
     """
     InternLM1 MoE.
 
@@ -385,3 +386,11 @@ class Internlm1MoE(nn.Module):
             hidden_states = self.head(hidden_states)
 
         return hidden_states, moe_losses
+
+    @staticmethod
+    def load_hf_weights(folder: str, model: nn.Module) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    def convert_internevo2hf_weights(src: str, tgt: str) -> None:
+        raise NotImplementedError

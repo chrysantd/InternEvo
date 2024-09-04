@@ -3,7 +3,7 @@
 
 import math
 import time
-from typing import Callable, Iterable, List, Optional, Tuple, TypeVar, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, TypeVar, Union
 
 import torch
 from torch import nn
@@ -55,7 +55,9 @@ from internlm.model.modules.linear import (
     RewardModelLinear,
     RowParallelLinear,
     ScaleColumnParallelLinear,
+    new_linear,
 )
+from internlm.model.modules.norm import new_layer_norm
 from internlm.model.moe import Experts, MoE
 from internlm.model.ops.norm import RMSNorm
 from internlm.model.registry import register_model_initializer
@@ -69,7 +71,7 @@ from internlm.solver.optimizer import (
 from internlm.solver.optimizer.compatible_adamw import new_compatible_adamw
 from internlm.solver.schedulers.beta2_scheduler import Beta2Scheduler
 from internlm.solver.schedulers.lr_scheduler import FineTuneCosineAnnealingWarmupLR
-from internlm.train.utils import create_param_groups, map_param_block
+from internlm.train.utils import create_param_groups, map_param_block, timeout_input
 from internlm.utils.common import DummyProfile, SchedulerHook, get_current_device
 from internlm.utils.logger import get_logger
 from internlm.utils.megatron_timers import megatron_timer as timer
@@ -91,6 +93,19 @@ try:
     import torch_npu
 except (ImportError, ModuleNotFoundError):
     pass
+
+IS_INJECTED = "is_injected"
+
+LINEAR2NEWLINEAR_NAME_MAPPING = dict(
+    q_proj="wq",
+    k_proj="wk",
+    v_proj="wv",
+    o_proj="wo",
+    gate_proj="w1",
+    down_proj="w2",
+    up_proj="w3",
+    lm_head="head",
+)
 
 logger = get_logger(__file__)
 internlm_accelerator = get_accelerator()
@@ -171,7 +186,6 @@ def set_parallel_attr_for_param_groups(model: Union[nn.Module, nn.ModuleList]):
 def initialize_model(pre_process_func: Optional[Callable] = None, post_process_func: Optional[Callable] = None):
     """
     Initialize model with Automatic Mixed Precision.
-
     Returns:
         torch.nn.Module:
             The neural network model to be trained or evaluated.
@@ -185,6 +199,27 @@ def initialize_model(pre_process_func: Optional[Callable] = None, post_process_f
 
     if post_process_func:
         post_process_func(pre_process_output)
+
+    return inject_model(model)
+
+
+def inject_model(model):
+    """
+    Inject model with Automatic Mixed Precision.
+
+    Args:
+        torch.nn.Module:
+            The bare neural network model to be trained or evaluated.
+
+    Returns:
+        torch.nn.Module:
+            The injected neural network model to be trained or evaluated.
+    """
+
+    if hasattr(model, IS_INJECTED) and getattr(model, IS_INJECTED):
+        return model
+
+    inject_model_helper(model, inject_info=gpc.config.model.get("inject_info", None))
 
     # should be set before NaiveAMPModel
     set_fp32_attr_for_model(model)
@@ -224,6 +259,9 @@ def initialize_model(pre_process_func: Optional[Callable] = None, post_process_f
     # state in the same dp group are all the same.
     random_mode = ParallelMode.WEIGHT_DATA if is_using_isp() else ParallelMode.DATA
     set_mode(random_mode)
+
+    # set is_injected flag
+    setattr(model, "IS_INJECTED", True)
 
     return model
 
@@ -269,7 +307,11 @@ def initialize_parallel_communicator(model: Union[nn.Module, nn.ModuleList]):
         ColumnParallelLinear.register_cls_communicator(isp_communicator)
         # row parallel linear will not be used.
         RowParallelLinear.register_cls_communicator(None)
-        _head_communicator = HeadWeightParallelCommunicator(gpc.get_group(ParallelMode.WEIGHT))
+        _head_communicator = HeadWeightParallelCommunicator(
+            weight_process_group=gpc.get_group(ParallelMode.WEIGHT),
+            seq_process_group=gpc.get_group(ParallelMode.TENSOR),
+            retain_out_sharded=_retain_out_sharded,
+        )
         _embedding_communicator = EmbeddingWeightParallelCommunicator(ParallelMode.WEIGHT)
 
     # register communictor for mtp/msp/fsp linear.
@@ -546,7 +588,7 @@ def record_current_batch_training_metrics(
     train_state,
     optimizer,
     beta2_scheduler,
-    trainer,
+    engine,
     start_time,
     very_begining_time,
     loss,
@@ -568,10 +610,10 @@ def record_current_batch_training_metrics(
 
     if success_update and gpc.is_rank_for_log():
         lr = optimizer.param_groups[0]["lr"]
-        if hasattr(trainer.engine.optimizer, "grad_scaler"):
-            scaler = trainer.engine.optimizer.grad_scaler._scale.item()
-        elif hasattr(trainer.engine.optimizer.optim, "grad_scaler"):
-            scaler = trainer.engine.optimizer.optim.grad_scaler._scale.item()
+        if hasattr(engine.optimizer, "grad_scaler"):
+            scaler = engine.optimizer.grad_scaler._scale.item()
+        elif hasattr(engine.optimizer.optim, "grad_scaler"):
+            scaler = engine.optimizer.optim.grad_scaler._scale.item()
 
         num_tokens_in_batch = batch[1].nelement()
         real_num_tokens = math.ceil(acc_perplex.pop("real_token_num") / gpc.get_world_size(ParallelMode.GLOBAL))
@@ -689,3 +731,156 @@ def record_current_batch_training_metrics(
             step_count=batch_count,
             cur_step_loss=loss.item(),
         )
+
+
+def inject_embed(model: nn.Module, inject=False, interactive=False) -> None:
+    def traverse(module):
+        for name, child in module.named_children():
+            if isinstance(child, nn.Embedding) and not isinstance(child, Embedding1D):
+                msg = (
+                    f"To get parallel training enabled, module {name} of type {nn.Embedding.__name__} "
+                    + f"is required to be replaced with {Embedding1D.__name__}."
+                )
+                if inject:
+                    help_msg = f"Do you want to replace {name}? (y/n)"
+                    opt = timeout_input(
+                        f"{msg}\n{help_msg}",
+                        default="y",
+                        timeout=60,
+                        interactive=interactive,
+                    )
+                    if opt in ["y", "yes"]:
+                        child_new = Embedding1D(
+                            num_embeddings=child.num_embeddings,
+                            embedding_dim=child.embedding_dim,
+                            padding_idx=child.padding_idx,
+                        ).to(device=child.weight.device, dtype=child.weight.dtype)
+                        setattr(module, name, child_new)
+                    else:
+                        if gpc.is_rank_for_log():
+                            logger.warning(f"Skip replacing {name}")
+                else:
+                    if gpc.is_rank_for_log():
+                        logger.warning(msg)
+            else:
+                traverse(child)
+
+    traverse(model)
+
+
+def inject_linear(model: nn.Module, inject=False, interactive=False) -> None:
+    def traverse(module):
+        for name, child in module.named_children():
+            if isinstance(child, nn.Linear) and not isinstance(child, ParallelLinearWithCommExt):
+                msg = (
+                    f"To get parallel training enabled, module {name} of type {nn.Linear.__name__} "
+                    + f"is required to be replaced with {new_linear.__name__}."
+                )
+                if inject:
+                    help_msg = f"Do you want to replace {name}? (y/n)"
+                    opt = timeout_input(
+                        f"{msg}\n{help_msg}",
+                        default="y",
+                        timeout=60,
+                        interactive=interactive,
+                    )
+                    if opt in ["y", "yes"]:
+                        child_new = new_linear(
+                            name=LINEAR2NEWLINEAR_NAME_MAPPING.get(name, name),
+                            in_features=child.in_features,
+                            out_features=child.out_features,
+                            bias=child.bias is not None,
+                        ).to(device=child.weight.device, dtype=child.weight.dtype)
+                        setattr(module, name, child_new)
+                    else:
+                        if gpc.is_rank_for_log():
+                            logger.warning(f"Skip replacing {name}")
+                else:
+                    if gpc.is_rank_for_log():
+                        logger.warning(msg)
+            else:
+                traverse(child)
+
+    traverse(model)
+
+
+def inject_norm(model: nn.Module, inject=False, interactive=False) -> None:
+    def traverse(module):
+        for name, child in module.named_children():
+            cls_name = type(child).__name__
+            if "RMSNorm" in cls_name:
+                msg = (
+                    f"To re-use unified RMSNorm implementation, {cls_name} "
+                    + f"is suggested to be replaced with {new_layer_norm.__name__}."
+                )
+                if inject:
+                    help_msg = f"Do you want to replace {name}? (y/n)"
+                    opt = timeout_input(
+                        f"{msg}\n{help_msg}",
+                        default="y",
+                        timeout=60,
+                        interactive=interactive,
+                    )
+                    if opt in ["y", "yes"]:
+                        child_new = new_layer_norm(
+                            norm_type="rmsnorm",
+                            normalized_shape=child.weight.shape,
+                            eps=child.variance_epsilon,
+                        ).to(device=child.weight.device, dtype=child.weight.dtype)
+                        setattr(module, name, child_new)
+                    else:
+                        if gpc.is_rank_for_log():
+                            logger.warning(f"Skip replacing {name}")
+                else:
+                    if gpc.is_rank_for_log():
+                        logger.warning(msg)
+            else:
+                traverse(child)
+
+    traverse(model)
+
+
+def inject_config(model: nn.Module) -> None:
+    gpc.config.model.vocab_size = gpc.config.VOCAB_SIZE = model.config.vocab_size
+    gpc.config.model.hidden_size = gpc.config.HIDDEN_SIZE = model.config.hidden_size
+    gpc.config.model.num_layers = gpc.config.NUM_LAYER = model.config.num_hidden_layers
+    gpc.config.model.num_attention_heads = gpc.config.NUM_ATTENTION_HEAD = model.config.num_attention_heads
+    gpc.config.model.mlp_ratio = gpc.config.MLP_RATIO = model.config.intermediate_size / model.config.hidden_size
+    # For models that use GQA
+    if hasattr(model.config, "num_key_value_heads"):
+        gpc.config.model.num_kv_attention_heads = gpc.config.NUM_KV_ATTENTION_HEAD = model.config.num_key_value_heads
+
+
+def inject_model_helper(model: nn.Module, inject_info: Optional[Dict] = None) -> None:
+    inject = False
+    interactive = False
+    modules = []
+    reset_params = False
+
+    if inject_info is not None:
+        inject = inject_info.get("inject", False)
+        interactive = inject_info.get("interactive", False)
+        modules = inject_info.get("modules", [])
+        reset_params = inject_info.get("reset_params", False)
+
+    inject_funcs = {
+        "embed": inject_embed,
+        "linear": inject_linear,
+        "norm": inject_norm,
+    }
+
+    for mod in modules:
+        inject_funcs[mod](model, inject, interactive)
+
+    if inject:
+        if reset_params:
+            model.reset_parameters()
+
+        inject_config(model)
+
+        if gpc.is_rank_for_log():
+            logger.info(
+                f"inject is enabled, please check the model carefully, "
+                f"if there are any problems, please report issue to us. "
+                f"The injected model is \n {model}"
+            )

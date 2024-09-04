@@ -4,6 +4,8 @@
 import multiprocessing
 import os
 
+from safetensors.torch import load_file, save_file
+
 from internlm.utils.common import SingletonMeta
 
 if "USE_DILL_PICKLE" in os.environ:
@@ -818,11 +820,17 @@ class LocalClient(StorageClient):
                 os.makedirs(fp_dirname, exist_ok=True)
         except FileNotFoundError:
             pass
+        # Handle safetensors
+        if fp.endswith(".safetensors"):
+            return save_file(saved_obj, fp, **kwargs)
         torch.save(saved_obj, fp, **kwargs)
 
     @staticmethod
     def load(load_path: str, **kwargs):
         assert os.path.exists(load_path), f"{load_path} is not found!"
+        # Handle safetensors
+        if load_path.endswith(".safetensors"):
+            return load_file(load_path)
         with open(load_path, "rb") as f:
             states = torch.load(f, **kwargs)
         return states

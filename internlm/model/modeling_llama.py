@@ -1,9 +1,12 @@
 import math
+import os
 from typing import Optional
 
 import torch
 from torch import nn
+from tqdm import tqdm
 
+from internlm.accelerator import get_accelerator
 from internlm.core.context import ParallelMode
 from internlm.core.context.parallel_context import global_context as gpc
 from internlm.core.naive_amp import set_output_attr_to_module
@@ -13,6 +16,7 @@ from internlm.initialize.initialize_tensor import (
     scaled_init_method_uniform,
     uniform_,
 )
+from internlm.model.base_model import BaseModel
 from internlm.model.modules.embedding import Embedding1D
 from internlm.model.modules.linear import new_linear
 from internlm.model.modules.mha import GQA
@@ -24,7 +28,14 @@ from internlm.model.utils import (
 )
 from internlm.solver.activation_checkpoint import activation_checkpoint
 from internlm.utils.logger import get_logger
+from internlm.utils.storage_manager import get_fns, llm_load, llm_save
+from transformers.modeling_utils import (
+    SAFE_WEIGHTS_INDEX_NAME,
+    SAFE_WEIGHTS_NAME,
+    shard_checkpoint,
+)
 
+internlm_accelerator = get_accelerator()
 logger = get_logger(__file__)
 
 
@@ -269,7 +280,7 @@ class Llama2Decoder(nn.Module):
             return hidden_states
 
 
-class Llama2(nn.Module):
+class Llama2(BaseModel):
     """
     Llama2 Model.
 
@@ -444,3 +455,255 @@ class Llama2(nn.Module):
             hidden_states = self.output(hidden_states)
 
         return hidden_states
+
+    @staticmethod
+    def load_hf_weights(folder: str, model: nn.Module):
+        """NOTE: when loading huggingface's llama pretrained weights, you should set `adapt_hf=True` in your config."""
+        """NOTE: specified for meta-llama/Llama-2-7b-hf"""
+        assert folder is not None, "Please specify the folder of the pretrained model"
+        if gpc.is_rank_for_log():
+            logger.info(f"Loading pretrained model from {folder}")
+
+        fns = get_fns(folder)
+        model_fns = [
+            os.path.join(folder, fn)
+            for fn in fns
+            if (fn.endswith(".bin") and fn.startswith("pytorch_model"))
+            or (fn.endswith(".safetensors") and fn.startswith("model"))
+        ]
+        model_fns.sort()
+
+        state_dict = {}
+        for model_fn in model_fns:
+            state_dict.update(llm_load(model_fn, map_location="cpu"))
+
+        tp_size = gpc.get_world_size(ParallelMode.TENSOR)
+        tp_rank = gpc.get_local_rank(ParallelMode.TENSOR)
+        wp_size = gpc.get_world_size(ParallelMode.WEIGHT)
+        wp_rank = gpc.get_local_rank(ParallelMode.WEIGHT)
+        tp_mode = gpc.config.parallel.tensor["mode"]
+        split_size = wp_size if tp_mode == "isp" else tp_size
+        local_rank = wp_rank if tp_mode == "isp" else tp_rank
+        row_dim = 0 if tp_mode == "isp" else 1
+        if gpc.config.model.get("embed_split_hidden", True):
+            embed_concat_dim = 1
+        else:
+            embed_concat_dim = 0
+
+        new_state_dict = {}
+
+        for idx, i in enumerate(range(model.first_layer, model.last_layer)):
+            layer_ids = i
+
+            # attn
+            state_dict[f"layers.{i}.attention.wq.weight"] = torch.chunk(
+                state_dict.pop(f"model.layers.{layer_ids}.self_attn.q_proj.weight"),
+                split_size,
+                dim=0,
+            )[local_rank]
+            state_dict[f"layers.{i}.attention.wk.weight"] = torch.chunk(
+                state_dict.pop(f"model.layers.{layer_ids}.self_attn.k_proj.weight"),
+                split_size,
+                dim=0,
+            )[local_rank]
+            state_dict[f"layers.{i}.attention.wv.weight"] = torch.chunk(
+                state_dict.pop(f"model.layers.{layer_ids}.self_attn.v_proj.weight"),
+                split_size,
+                dim=0,
+            )[local_rank]
+            state_dict[f"layers.{i}.attention.wo.weight"] = torch.chunk(
+                state_dict.pop(f"model.layers.{layer_ids}.self_attn.o_proj.weight"),
+                split_size,
+                dim=row_dim,
+            )[local_rank]
+
+            # ffn
+            state_dict[f"layers.{i}.feed_forward.w1.weight"] = torch.chunk(
+                state_dict.pop(f"model.layers.{layer_ids}.mlp.gate_proj.weight"),
+                split_size,
+                dim=0,
+            )[local_rank]
+            state_dict[f"layers.{i}.feed_forward.w3.weight"] = torch.chunk(
+                state_dict.pop(f"model.layers.{layer_ids}.mlp.up_proj.weight"),
+                split_size,
+                dim=0,
+            )[local_rank]
+            state_dict[f"layers.{i}.feed_forward.w2.weight"] = torch.chunk(
+                state_dict.pop(f"model.layers.{layer_ids}.mlp.down_proj.weight"),
+                split_size,
+                dim=row_dim,
+            )[local_rank]
+
+            # attn norm
+            state_dict[f"layers.{i}.attention_norm.weight"] = state_dict.pop(
+                f"model.layers.{layer_ids}.input_layernorm.weight"
+            )
+
+            # ffn norm
+            state_dict[f"layers.{i}.ffn_norm.weight"] = state_dict.pop(
+                f"model.layers.{layer_ids}.post_attention_layernorm.weight"
+            )
+
+            # skip rotary_emb inv_freq
+            if f"model.layers.{layer_ids}.self_attn.rotary_emb.inv_freq" in state_dict:
+                state_dict.pop(f"model.layers.{layer_ids}.self_attn.rotary_emb.inv_freq")
+
+            # replace value within decoder layer
+            for name in list(state_dict.keys()):
+                if name.startswith(f"layers.{i}"):
+                    new_state_dict[name.replace(f".{i}.", f".{idx}.")] = state_dict.pop(name)
+
+        # embedding
+        if (gpc.get_local_rank(ParallelMode.PIPELINE) == 0) or (not gpc.is_using_parallel_mode(ParallelMode.PIPELINE)):
+            new_state_dict["tok_embeddings.weight"] = torch.chunk(
+                state_dict.pop("model.embed_tokens.weight"),
+                split_size,
+                dim=embed_concat_dim,
+            )[local_rank]
+
+        # output
+        if gpc.is_last_rank(ParallelMode.PIPELINE):
+            new_state_dict["output.weight"] = torch.chunk(
+                state_dict.pop("lm_head.weight"),
+                split_size,
+                dim=0,
+            )[local_rank]
+            new_state_dict["norm.weight"] = state_dict.pop("model.norm.weight")
+
+        missing_keys, unexpected_keys = model.load_state_dict(new_state_dict, strict=False)
+        if len(state_dict) > 0:
+            logger.warning(f"Be cautious, checkpoint state_dict keys={state_dict.keys()} have not beed loaded.")
+
+        if gpc.get_local_rank(ParallelMode.DATA) == 0:
+            pp_rank = 0 if not gpc.is_initialized(ParallelMode.PIPELINE) else gpc.get_local_rank(ParallelMode.PIPELINE)
+            logger.info(
+                f"Missing keys:{missing_keys}, unexpected keys:{unexpected_keys} in "
+                f"tp:{gpc.get_local_rank(ParallelMode.TENSOR)}, pp:{pp_rank}"
+            )
+
+        internlm_accelerator.empty_cache()
+
+    @staticmethod
+    def load_llama_pretrained_weights(folder: str, model: nn.Module) -> None:
+        """NOTE: when loading huggingface's llama pretrained weights, you should set `adapt_hf=True` in your config."""
+        """NOTE: specified for meta-llama/Llama-2-7b"""
+        assert folder is not None, "Please specify the folder of the pretrained model"
+        if gpc.is_rank_for_log():
+            logger.info(f"Loading pretrained model from {folder}")
+
+        fns = get_fns(folder)
+        model_fns = []
+        for fn in fns:
+            if fn.startswith("model_t") and not fn.endswith("md5"):
+                model_fns.append(os.path.join(folder, fn))
+
+        if len(model_fns) == 0:
+            model_fns = [os.path.join(folder, fn) for fn in fns if fn.endswith(".pth") or fn.endswith(".pt")]
+
+        if len(model_fns) == 0:
+            raise FileNotFoundError(f"No checkpoint file found in {folder}")
+
+        model_fns.sort()
+
+        old_tp = len(model_fns)
+        cur_tp = gpc.get_world_size(ParallelMode.TENSOR)
+        # If the two tp are inconsistent, you need to consider the merge before splitting
+        if old_tp != cur_tp:
+            raise RuntimeError(
+                f"Your current tp is `{cur_tp}`, but the tp in folder:`{folder}` is `{old_tp}`, use `` to convert first"
+            )
+
+        states = llm_load(model_fns[gpc.get_local_rank(ParallelMode.TENSOR)], map_location="cpu")
+
+        current_states = {}
+        for idx, i in enumerate(range(model.first_layer, model.last_layer)):
+            for name in list(states.keys()):
+                if f".{i}." in name:
+                    current_states[name.replace(f".{i}.", f".{idx}.")] = states.pop(name)
+
+        model_state_keys = set(list(model.state_dict().keys()))
+
+        if "tok_embeddings.weight" in model_state_keys:
+            current_states["tok_embeddings.weight"] = states["tok_embeddings.weight"]
+            assert model.first_layer == 0, f"Expect model.NaiveAMPModel to be 0, but got {model.first_layer}"
+        if "output.weight" in model_state_keys:
+            current_states["norm.weight"] = states["norm.weight"]
+            current_states["output.weight"] = states["output.weight"]
+        missing_keys, unexpected_keys = model.load_state_dict(current_states, strict=False)
+
+        if gpc.get_local_rank(ParallelMode.DATA) == 0:
+            pp_rank = 0 if not gpc.is_initialized(ParallelMode.PIPELINE) else gpc.get_local_rank(ParallelMode.PIPELINE)
+            logger.info(
+                f"Missing keys:{missing_keys}, unexpected keys:{unexpected_keys} in "
+                f"tp:{gpc.get_local_rank(ParallelMode.TENSOR)}, pp:{pp_rank}"
+            )
+
+        internlm_accelerator.empty_cache()
+
+    @staticmethod
+    def convert_internevo2hf_weights(src: str, tgt: str) -> None:
+        model_config = gpc.config.model
+        tp_mode = gpc.config.parallel.tensor["mode"]
+        row_dim = 0 if tp_mode == "isp" else 1
+        if model_config["embed_split_hidden"]:
+            embed_concat_dim = 1
+        else:
+            embed_concat_dim = 0
+
+        # load states
+        states, num_shards = Llama2.load_sharded_states(src)
+
+        # convert state_dict
+        state_dict = {}
+        for layer_i in tqdm(range(model_config["num_layers"])):
+            # attn norm, ffn norm
+            state_dict.update(
+                {
+                    f"model.layers.{layer_i}.input_layernorm.weight": states[0][
+                        f"layers.{layer_i}.attention_norm.weight"
+                    ].clone(),
+                    f"model.layers.{layer_i}.post_attention_layernorm.weight": states[0][
+                        f"layers.{layer_i}.ffn_norm.weight"
+                    ].clone(),
+                }
+            )
+            # attn
+            state_dict[f"model.layers.{layer_i}.self_attn.q_proj.weight"] = torch.cat(
+                [states[i][f"layers.{layer_i}.attention.wq.weight"] for i in range(num_shards)], dim=0
+            )
+            state_dict[f"model.layers.{layer_i}.self_attn.k_proj.weight"] = torch.cat(
+                [states[i][f"layers.{layer_i}.attention.wk.weight"] for i in range(num_shards)], dim=0
+            )
+            state_dict[f"model.layers.{layer_i}.self_attn.v_proj.weight"] = torch.cat(
+                [states[i][f"layers.{layer_i}.attention.wv.weight"] for i in range(num_shards)], dim=0
+            )
+            state_dict[f"model.layers.{layer_i}.self_attn.o_proj.weight"] = torch.cat(
+                [states[i][f"layers.{layer_i}.attention.wo.weight"] for i in range(num_shards)], dim=row_dim
+            )
+            # ffn
+            state_dict[f"model.layers.{layer_i}.mlp.gate_proj.weight"] = torch.cat(
+                [states[i][f"layers.{layer_i}.feed_forward.w1.weight"] for i in range(num_shards)], dim=0
+            )
+            state_dict[f"model.layers.{layer_i}.mlp.down_proj.weight"] = torch.cat(
+                [states[i][f"layers.{layer_i}.feed_forward.w2.weight"] for i in range(num_shards)], dim=row_dim
+            )
+            state_dict[f"model.layers.{layer_i}.mlp.up_proj.weight"] = torch.cat(
+                [states[i][f"layers.{layer_i}.feed_forward.w3.weight"] for i in range(num_shards)], dim=0
+            )
+        # embedding, output
+        state_dict.update(
+            {
+                "model.norm.weight": states[0]["norm.weight"],
+                "model.embed_tokens.weight": torch.cat(
+                    [states[i]["tok_embeddings.weight"] for i in range(num_shards)], dim=embed_concat_dim
+                ),
+                "lm_head.weight": torch.cat([states[i]["output.weight"] for i in range(num_shards)], dim=0),
+            },
+        )
+
+        # save state_dict to hf format
+        shards, index = shard_checkpoint(state_dict, weights_name=SAFE_WEIGHTS_NAME)
+        for shard_file, shard in shards.items():
+            llm_save(save_path=os.path.join(tgt, shard_file), saved_obj=shard, metadata={"format": "pt"})
+        if index is not None:
+            llm_save(save_path=os.path.join(tgt, SAFE_WEIGHTS_INDEX_NAME), saved_obj=index)
