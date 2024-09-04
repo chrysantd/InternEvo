@@ -781,7 +781,8 @@ class ISPCommunicatorSchedulerHook(SchedulerHook):
 
     def after_backward(self, scheduler, inputs_grad) -> None:  # pylint: disable=W0613
         # accumulate left gradients in last bucket after backward.
-        self._zero_optim.accumulate_left_grads_after_backward()
+        if self._isp_communicator and self._isp_communicator.overlap:
+            self._zero_optim.accumulate_left_grads_after_backward()
         # reset lazy memory pools for reduce scatter after every micro step.
         if self._isp_communicator and self._isp_communicator.enable_memory_pool:
             self._isp_communicator.memory_pool.reset_lazy_pools()

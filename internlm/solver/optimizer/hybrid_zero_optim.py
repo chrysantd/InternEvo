@@ -403,7 +403,7 @@ class HybridZeroOptimizer(BaseOptimizer):
                 _define_and_attach(param, reduce_rank)
 
     def accumulate_left_grads_after_backward(self):
-        if self._isp_communicator is None or self._isp_communicator.overlap is False:
+        if self._isp_communicator is None:
             return
 
         for group_id in range(self.num_param_groups):
@@ -436,9 +436,7 @@ class HybridZeroOptimizer(BaseOptimizer):
 
             # release cuda memory.
             if self._isp_communicator.enable_memory_pool:
-                self._isp_communicator.memory_pool.free_reduce_scatter_memory(
-                    key=tuple(_grad.size()), index=_grad.index
-                )
+                self._isp_communicator.free_reduce_scatter_memory(key=tuple(_grad.size()), index=_grad.index)
             _grad = None
             self._isp_communicator.reduce_scatter_handlers[_key] = None
 
