@@ -145,7 +145,7 @@ class EmbeddingWeightParallelCommunicator:
 
     def __init__(self, parallel_mode: ParallelMode) -> None:
         self.parallel_mode = parallel_mode
-        self.emb_column = 1
+        self.vocab_dim = 0
 
         self._cur_micro_step = 0
         self._num_micro_step = gpc.config.data.micro_num
@@ -165,7 +165,7 @@ class EmbeddingWeightParallelCommunicator:
                 if module.weight.evo_tensor is None:
                     module.weight.evo_tensor = module.weight.data
 
-                module.weight.data = _gather(module.weight, self.parallel_mode, dim=self.emb_column)
+                module.weight.data = _gather(module.weight, self.parallel_mode, dim=self.vocab_dim)
                 inputs = inputs.detach()
                 return inputs
 
@@ -188,7 +188,7 @@ class EmbeddingWeightParallelCommunicator:
 
             @staticmethod
             def backward(ctx: Any, grad_output: torch.Tensor) -> torch.Tensor:  # pylint: disable=W0613
-                module.weight.data = _gather(module.weight, self.parallel_mode, dim=self.emb_column)
+                module.weight.data = _gather(module.weight, self.parallel_mode, dim=self.vocab_dim)
                 return grad_output
 
         def _pre_forward_hook(module, inputs):  # pylint: disable=W0613
@@ -205,7 +205,7 @@ class EmbeddingWeightParallelCommunicator:
     def grad_reduce_hook(self, param: torch.Tensor):
 
         _grad, _ = reduce_scatter_raw(
-            param.grad, gpc.get_group(self.parallel_mode), op=dist.ReduceOp.AVG, reduce_dim=self.emb_column
+            param.grad, gpc.get_group(self.parallel_mode), op=dist.ReduceOp.AVG, reduce_dim=self.vocab_dim
         )
         if param.evo_tensor.grad is None:
             param.evo_tensor.grad = _grad

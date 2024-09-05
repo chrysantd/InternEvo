@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import Tensor, nn
 
+from internlm.core.context import ParallelMode
 from internlm.core.context import global_context as gpc
 from internlm.model.ops.rotary_emb import apply_rotary_emb
 from internlm.utils.parallel import is_using_isp
@@ -33,6 +34,7 @@ class Embedding1D(nn.Module):
         *args,
         padding_idx: int = None,
         dtype: torch.dtype = None,
+        vocab_parallel: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -42,14 +44,54 @@ class Embedding1D(nn.Module):
         self.padding_idx = padding_idx
         self.embed_args = args
         self.embed_kwargs = kwargs
+        self.vocab_parallel = vocab_parallel
 
-        _parallel_size = gpc.weight_parallel_size if is_using_isp() else gpc.tensor_parallel_size
+        if is_using_isp():
+            # isp: split vocab_size to support the sharing of parameters between embedding and head.
+            assert (
+                num_embeddings % gpc.weight_parallel_size == 0
+            ), f"{num_embeddings} is not divisible by {gpc.weight_parallel_size}"
+            self.num_embeddings_per_partition = num_embeddings // gpc.weight_parallel_size
+            self.embed_dim_per_partition = embedding_dim
+        elif vocab_parallel:
 
-        embed_dim_per_partition = embedding_dim // _parallel_size
-        self.weight = nn.Parameter(torch.empty((num_embeddings, embed_dim_per_partition), dtype=dtype))
+            assert (
+                num_embeddings % gpc.tensor_parallel_size == 0
+            ), f"{num_embeddings} is not divisible by {gpc.tensor_parallel_size}"
+
+            self.num_embeddings_per_partition = num_embeddings // gpc.tensor_parallel_size
+            self.embed_dim_per_partition = embedding_dim
+            self.vocab_start_index = gpc.get_local_rank(ParallelMode.TENSOR) * self.num_embeddings_per_partition
+            self.vocab_end_index = self.vocab_start_index + self.num_embeddings_per_partition
+        else:
+            # mtp/msp/fsp: do not support the sharing of parameters between embedding and head,
+            # use VocabParallelEmbedding1D instead.
+            assert (
+                embedding_dim % gpc.tensor_parallel_size == 0
+            ), f"{embedding_dim} is not divisible by {gpc.tensor_parallel_size}"
+            self.num_embeddings_per_partition = num_embeddings
+            self.embed_dim_per_partition = embedding_dim // gpc.tensor_parallel_size
+
+        self.weight = nn.Parameter(
+            torch.empty((self.num_embeddings_per_partition, self.embed_dim_per_partition), dtype=dtype)
+        )
 
     def forward(self, input_: Tensor) -> Tensor:
-        return F.embedding(input_, self.weight, self.padding_idx, *self.embed_args, **self.embed_kwargs)
+        if self.vocab_parallel:
+            # Build the mask.
+            input_mask = (input_ < self.vocab_start_index) | (input_ >= self.vocab_end_index)
+            # Mask the input.
+            masked_input = input_.clone() - self.vocab_start_index
+            masked_input[input_mask] = 0
+        else:
+            masked_input = input_
+
+        output = F.embedding(masked_input, self.weight, self.padding_idx, *self.embed_args, **self.embed_kwargs)
+
+        if self.vocab_parallel:
+            output[input_mask, :] = 0.0
+
+        return output
 
 
 class RotaryEmbedding(torch.nn.Module):
