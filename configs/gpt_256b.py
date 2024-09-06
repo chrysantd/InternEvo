@@ -5,7 +5,7 @@ SEQ_LEN = 8192
 HIDDEN_SIZE = 8192
 NUM_ATTENTION_HEAD = 64
 MLP_RATIO = 4
-NUM_LAYER = 1
+NUM_LAYER = 64
 VOCAB_SIZE = 103168
 
 MODEL_ONLY_FOLDER = "local:llm_ckpts/xxxx"
@@ -189,10 +189,10 @@ weight parallel (dict):
 """
 parallel = dict(
     zero1=dict(size=-1, fsdp=False),
-    tensor=dict(size=1, mode="mtp"),
-    pipeline=dict(size=1, interleaved_overlap=True),
+    tensor=dict(size=16, mode="mtp"),
+    pipeline=dict(size=16, interleaved_overlap=True),
     weight=dict(size=1, overlap=True, memory_pool=True),
-    expert=dict(size=-1, no_tp=False),
+    expert=dict(size=16, no_tp=True),
     expert_weight=dict(size=1, overlap=True, memory_pool=True),
 )
 
