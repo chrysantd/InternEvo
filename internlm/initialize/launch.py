@@ -370,10 +370,6 @@ def args_sanity_check():
             not gpc.config.model.qk_interleaved
         ), "adapt_hf and qk_interleaved must be opposite"
 
-    # shared embedding
-    if "tie_embeddings_and_output_weights" not in model:
-        model._add_item("tie_embeddings_and_output_weights", False)
-
     # process the parallel config
     if "sequence_parallel" not in gpc.config.parallel:
         gpc.config.parallel._add_item("sequence_parallel", False)
