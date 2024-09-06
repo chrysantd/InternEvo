@@ -10,6 +10,7 @@ from torch import nn
 from internlm.core.context import ParallelMode
 from internlm.core.context.parallel_context import global_context as gpc
 from internlm.initialize.initialize_tensor import normal_, scaled_init_method_normal
+from internlm.model.base_model import BaseModel
 from internlm.model.modules.embedding import Embedding1D
 from internlm.model.modules.linear import new_linear
 from internlm.model.modules.mha import MHA
@@ -243,7 +244,7 @@ class GPTMoEDecoder(nn.Module):
         return hidden_states + residual, moe_loss
 
 
-class GPTMoE(nn.Module):
+class GPTMoE(BaseModel):
     """
     InternLM1 MoE.
 
@@ -315,13 +316,18 @@ class GPTMoE(nn.Module):
         top_k: int = 1,
         num_shared_experts: int = 0,
         moe_layer_kwargs: dict = None,
+        tie_embeddings_and_output_weights: bool = False,
     ):
         super().__init__()
+
+        self.tie_embeddings_and_output_weights = tie_embeddings_and_output_weights
 
         checkpoint_layer_num = int(num_layers * checkpoint)
 
         if first:
-            self.embedding = Embedding1D(num_embeddings=vocab_size, embedding_dim=hidden_size)
+            self.embedding = Embedding1D(
+                num_embeddings=vocab_size, embedding_dim=hidden_size, vocab_parallel=True, device=device
+            )
 
             for _, param in self.embedding.named_parameters():
                 normal_(std=0.0052)(param)
@@ -368,11 +374,15 @@ class GPTMoE(nn.Module):
                 dtype=dtype,
                 is_reward=is_reward,
                 weight_scale=embed_grad_scale,
+                skip_weight_alloction=tie_embeddings_and_output_weights,
             )
             for _, param in self.head.named_parameters():
                 normal_(std=0.0052)(param)
 
         self.parallel_output = parallel_output
+
+        if self.tie_embeddings_and_output_weights:
+            self.initialize_word_embeddings(hidden_size, vocab_size, device)
 
     def forward(self, hidden_states=None, input_ids=None, **kwargs):
         # attention_mask: compute attention on the places where the value is 1
@@ -392,6 +402,68 @@ class GPTMoE(nn.Module):
         if hasattr(self, "norm"):
             hidden_states = self.norm(hidden_states.float())
         if hasattr(self, "head"):
-            hidden_states = self.head(hidden_states)
+            if self.tie_embeddings_and_output_weights:
+                hidden_states = self.head(hidden_states, self.shared_embedding_weight())
+            else:
+                hidden_states = self.head(hidden_states)
 
         return hidden_states, moe_losses
+
+    def shared_embedding_weight(self):
+        if not self.tie_embeddings_and_output_weights:
+            raise Exception(
+                "shared_embedding_weight() called for last stage, but share_embeddings_and_output_weights is false"
+            )
+
+        return self.embedding.weight
+
+    def initialize_word_embeddings(
+        self,
+        hidden_size: int = 768,
+        vocab_size: int = 50304,
+        device: Optional[torch.device] = None,
+    ):
+        if not self.tie_embeddings_and_output_weights:
+            raise Exception("initialize_word_embeddings() was called but tie_embeddings_and_output_weights is false")
+
+        # This function just initializes the word embeddings in the final stage
+        # when we are using pipeline parallelism. Nothing to do if we aren't
+        # using pipeline parallelism.
+        if gpc.get_world_size(ParallelMode.PIPELINE) == 1:
+            return
+
+        # Parameters are shared between the word embeddings layers, and the
+        # heads at the end of the model. In a pipelined setup with more than
+        # one stage, the initial embedding layer and the head are on different
+        # workers, so we do the following:
+        # 1. Create a second copy of word_embeddings on the last stage, with
+        #    initial parameters of 0.0.
+        # 2. Do an all-reduce between the first and last stage to ensure that
+        #    the two copies of word_embeddings start off with the same
+        #    parameter values.
+        # 3. In the training loop, before step perform an all-reduce between the
+        #    grads of the two word_embeddings layers to ensure that every applied
+        #    weight update is the same on both stages.
+        if gpc.is_pipeline_last_stage():
+            assert not gpc.is_pipeline_first_stage()
+            # set word_embeddings weights to 0 here, then copy first
+            # stage's weights using all_reduce below.
+            self.embedding = Embedding1D(
+                num_embeddings=vocab_size, embedding_dim=hidden_size, vocab_parallel=True, device=device
+            )
+            self.shared_embedding_weight().data.fill_(0)
+
+        # Ensure that first and last stages have the same initial parameter
+        # values.
+        if gpc.is_pipeline_first_stage() or gpc.is_pipeline_last_stage():
+            torch.distributed.all_reduce(
+                self.shared_embedding_weight().data, group=gpc.get_group(ParallelMode.EMBEDDING_HEAD)
+            )
+
+    @staticmethod
+    def load_hf_weights(folder: str, model: nn.Module) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    def convert_internevo2hf_weights(src: str, tgt: str) -> None:
+        raise NotImplementedError
