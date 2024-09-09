@@ -183,10 +183,9 @@ tensor parallel (dict):
         fsp: tensor parallel by flash-attn with sequence parallel, sequence parallel size = tensor parallel size.
         isp: customed intern sequence parallel without tensor parallel, can be used with weight parallel.
 pipeline parallel (dict):
-    1. size: int, the size of pipeline parallel (Default is 1F1B).
+    1. size: int, the size of pipeline parallel.
     2. interleaved_overlap: bool, enable/disable communication overlap when using interleaved pipeline scheduler,
         defaults to False.
-    3. zero_bubble: bool, enable/disable zero bubble pipeline parallelism (ZB-H1), defaults to False.
 weight parallel (dict):
     1. size: int, the size of weight parallel.
     2. overlap: bool, enable/disable all_gather/reduce_scatter communication overlap, defaults to False.
@@ -195,7 +194,7 @@ weight parallel (dict):
 parallel = dict(
     zero1=dict(size=-1),
     tensor=dict(size=1, mode="mtp"),
-    pipeline=dict(size=1, interleaved_overlap=True, zero_bubble=False),
+    pipeline=dict(size=1, interleaved_overlap=True),
     weight=dict(size=1, overlap=True, memory_pool=True),
 )
 

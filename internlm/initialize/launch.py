@@ -82,7 +82,7 @@ def args_sanity_check():
         gpc.config.parallel._add_item("zero1", dict(size=zero1_size, fsdp=False))
 
     if "pipeline" not in gpc.config.parallel:
-        gpc.config.parallel._add_item("pipeline", dict(size=1, interleaved_overlap=False, zero_bubble=False))
+        gpc.config.parallel._add_item("pipeline", dict(size=1, interleaved_overlap=False))
 
     if "tensor" not in gpc.config.parallel:
         gpc.config.parallel._add_item("tensor", dict(size=1, mode=TensorParallelMode.mtp.name))
@@ -478,18 +478,6 @@ def args_sanity_check():
         optim_ckpt._add_item("use_split_tensor_optim", False)
     elif optim_ckpt.use_split_tensor_optim and "all_gather_size" not in optim_ckpt:
         optim_ckpt._add_item("all_gather_size", 512 * 1024 * 1024)
-
-    if gpc.config.parallel["pipeline"].get("zero_bubble", False):
-        assert (
-            not optim_ckpt.overlap_sync_grad
-        ), "When using zero_bubble pipeline parallelism, overlap_sync_grad must be false"
-        assert (
-            getattr(gpc.config.model, "num_chunks", 1) == 1
-        ), "zero_bubble pp and interleaved pp cannot be used at the same time"
-        if gpc.config.parallel["tensor"]["mode"] == "isp":
-            assert not gpc.config.parallel["weight"].get(
-                "overlap", False
-            ), "When using zero_bubble pipeline parallelism, isp_overlap must be false"
 
     if gpc.is_rank_for_log():
         logger.info(

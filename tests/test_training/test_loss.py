@@ -10,10 +10,11 @@ from internlm.accelerator import AcceleratorType, get_accelerator
 from internlm.checkpoint import CheckpointManager
 from internlm.core.context import Config, ParallelMode
 from internlm.core.context import global_context as gpc
-from internlm.core.trainer import Trainer, TrainState
+from internlm.core.trainer import TrainState, Trainer
 from internlm.data import build_train_loader_with_data_type
 from internlm.initialize import initialize_distributed_env
 from internlm.model.losses import FlashGPTLMLoss
+from internlm.model.metrics import AccPerplex
 from internlm.train import (
     get_scheduler_hooks,
     initialize_model,
@@ -21,7 +22,7 @@ from internlm.train import (
     initialize_parallel_communicator,
     load_new_batch,
 )
-from internlm.utils.common import BatchSkipper, launch_time
+from internlm.utils.common import BatchSkipper, get_current_device, launch_time
 from internlm.utils.gputest import empty_cache_and_diag
 from internlm.utils.megatron_timers import megatron_timer as timer
 
@@ -61,7 +62,6 @@ def train(
     load_ckpt: bool = False,
     model_type: str = "INTERNLM",
     optimizer_ver: str = "v1",
-    zero_bubble: bool = False,
 ):
     # initialize distributed environment
     config = Config.from_file(CONFIG_FILE_PATH)
@@ -79,7 +79,7 @@ def train(
     label_smoothing = config.loss.label_smoothing
 
     if optimizer_ver == "v2":
-        config.hybrid_zero_optimizer.use_split_tensor_optim = True
+        config.hybrid_zero_optimizer.new_version = True
         config.all_gather_size = 512 * 1024 * 1024
 
     # update ckpt config
@@ -97,11 +97,7 @@ def train(
 
     # update parallel config
     config.parallel.tensor = dict(size=tp_size, mode=tp_mode)
-    if zero_bubble:
-        config.hybrid_zero_optimizer.overlap_sync_grad = False
-        config.parallel.pipeline = dict(size=pp_size, zero_bubble=True)
-    else:
-        config.parallel.pipeline = dict(size=pp_size)
+    config.parallel.pipeline = dict(size=pp_size)
     config.parallel.weight = dict(size=wp_size, overlap=True, memory_pool=True)
     if interleaved is True:
         config.parallel.pipeline = dict(size=pp_size, interleaved_overlap=True)
@@ -167,7 +163,7 @@ def train(
     criterion = FlashGPTLMLoss(parallel_output=True, label_smoothing=label_smoothing)
 
     # initialize the train data loader
-    train_dl, _ = build_train_loader_with_data_type()
+    train_dl, dataset_types = build_train_loader_with_data_type()
 
     # initialize and resume train state
     train_state = TrainState(gpc.config, train_dl.batch_sampler)
@@ -368,18 +364,6 @@ def test_training_loss_with_dp4_tp2_sp_optimizer_v2():
 def test_training_loss_with_dp4_pp2():
     # model training
     train(dp_size=4, pp_size=2)
-
-    # print loss value
-    print(f"cur_loss_list: {cur_loss_list}", flush=True)
-
-    check_loss_spike()
-    check_loss_accuracy()
-
-
-@pytest.mark.training_8GPU_4DP2PP_ZB
-def test_training_loss_with_dp4_pp2_zero_bubble():
-    # model training
-    train(dp_size=4, pp_size=2, zero_bubble=True)
 
     # print loss value
     print(f"cur_loss_list: {cur_loss_list}", flush=True)

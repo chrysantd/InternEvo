@@ -23,7 +23,6 @@ from internlm.core.scheduler import (
     InterleavedPipelineScheduler,
     NonPipelineScheduler,
     PipelineScheduler,
-    ZeroBubblePipelineScheduler,
 )
 from internlm.core.scheduler.pipeline_scheduler import get_tensor_shape
 from internlm.core.trainer import Trainer
@@ -129,15 +128,6 @@ def initialize_trainer(
                 scatter_gather_tensors=scatter_gather,
                 scheduler_hooks=scheduler_hooks,
                 communication_overlap=communication_overlap,
-            )
-        elif gpc.config.parallel["pipeline"].get("zero_bubble", False):
-            scheduler = ZeroBubblePipelineScheduler(
-                data_process_func=_data_preparation_func,
-                num_microbatches=gpc.config.NUM_MICRO_BATCHES,
-                dtype=gpc.config.model["dtype"],
-                tensor_shape=tensor_shape,
-                scatter_gather_tensors=scatter_gather,
-                scheduler_hooks=scheduler_hooks,
             )
         else:
             scheduler = PipelineScheduler(
