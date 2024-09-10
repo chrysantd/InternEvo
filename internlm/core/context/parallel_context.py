@@ -20,6 +20,7 @@ from internlm.utils.common import SingletonMeta
 from internlm.utils.logger import get_logger
 from internlm.utils.timeout import LLM_NCCL_TIMEOUT
 from internlm.utils.utils import TensorParallelMode
+from internlm.utils.zeropp_manager import ZeroppManager
 
 from . import process_group_initializer as pgroup_initializer
 from .process_group_initializer import ParallelMode
@@ -759,7 +760,10 @@ class ParallelContext(metaclass=SingletonMeta):
     def set_virtual_pipeline_parallel_size(self, size):
         self.virtual_pipeline_parallel_size = size
 
-    def set_virtual_pipeline_parallel_rank(self, rank):
+    def set_virtual_pipeline_parallel_rank(self, rank, clear_zeropp_cache=True):
+        if rank != self.virtual_pipeline_parallel_rank:
+            if clear_zeropp_cache:
+                ZeroppManager.clear_cached_wp_parameters()
         self.virtual_pipeline_parallel_rank = rank
 
 

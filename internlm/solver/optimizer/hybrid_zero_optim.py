@@ -432,7 +432,10 @@ class HybridZeroOptimizer(BaseOptimizer):
             _key = getattr(_param, "isp_reduce_scatter_name")
             _grad, _comm_handle = self._isp_communicator.reduce_scatter_handlers[_key]
             _comm_handle.wait()
-            _param.grad.add_(_grad)
+            if _param.grad is None:
+                _param.grad = _grad.clone()
+            else:
+                _param.grad.add_(_grad)
 
             # release cuda memory.
             if self._isp_communicator.enable_memory_pool:
@@ -442,7 +445,9 @@ class HybridZeroOptimizer(BaseOptimizer):
 
         bucket.reset_by_rank(reduce_rank)
 
-    def _wait_reduce_scatter_and_accumulate_grads(self, param, reduce_rank: Optional[int] = None):
+    def _wait_reduce_scatter_and_accumulate_grads(
+        self, param, reduce_rank: Optional[int] = None, skip_decoupled_grad_accum=True
+    ):
         param_size = param.numel()
 
         group_id = getattr(param, "group_id")
@@ -455,8 +460,9 @@ class HybridZeroOptimizer(BaseOptimizer):
             self._accum_grads_store_in_bucket(current_bucket, reduce_rank)
 
         # otherwise, add the parameter into bucket.
-        current_bucket.add_num_elements_in_bucket(param_size, reduce_rank)
-        current_bucket.add_param(param, reduce_rank)
+        if not ZeroppManager.check_postpond_grad_accum(param) or not skip_decoupled_grad_accum:
+            current_bucket.add_num_elements_in_bucket(param_size, reduce_rank)
+            current_bucket.add_param(param, reduce_rank)
 
     def _store_and_try_reduce_grads_by_bucket(self, param, reduce_rank=None):
         param_size = param.numel()
