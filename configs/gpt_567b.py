@@ -1,11 +1,18 @@
 JOB_NAME = "7b_moe_train"
 DO_ALERT = False
 
-SEQ_LEN = 8192
-HIDDEN_SIZE = 8192
-NUM_ATTENTION_HEAD = 64
-MLP_RATIO = 4
-NUM_LAYER = 64
+# SEQ_LEN = 8192
+# HIDDEN_SIZE = 8192
+# NUM_ATTENTION_HEAD = 64
+# MLP_RATIO = 4
+# NUM_LAYER = 6
+# VOCAB_SIZE = 103168
+
+SEQ_LEN = 2048
+HIDDEN_SIZE = 4096
+NUM_ATTENTION_HEAD = 32
+MLP_RATIO = 4 / 3
+NUM_LAYER = 32
 VOCAB_SIZE = 103168
 
 MODEL_ONLY_FOLDER = "local:llm_ckpts/xxxx"
@@ -44,8 +51,8 @@ ckpt = dict(
     oss_snapshot_freq=int(CHECKPOINT_EVERY / 2),  # snapshot ckpt save frequency.
 )
 
-TRAIN_FOLDER = None  # "/path/to/dataset"
-VALID_FOLDER = None  # "/path/to/dataset"
+TRAIN_FOLDER = "/mnt/petrelfs/quwenwen/0623_scratch_tokenized_filtered/train/"  # "/path/to/dataset"
+VALID_FOLDER = "/mnt/petrelfs/quwenwen/0623_scratch_tokenized_filtered/train/"  # "/path/to/dataset"
 data = dict(
     seq_len=SEQ_LEN,
     # micro_num means the number of micro_batch contained in one gradient update
@@ -55,7 +62,7 @@ data = dict(
     # defaults to the value of micro_num
     valid_micro_num=4,
     # defaults to 0, means disable evaluate
-    valid_every=50,
+    valid_every=50000,
     pack_sample_into_one=False,
     total_steps=50000,
     skip_batches="",
@@ -155,11 +162,13 @@ model = dict(
     # qk_interleaved = False: q[-1] = [q1,q3,q5,...,q2,q4,q6,...], k[-1] = [k1,k3,k5,...,k2,k4,k6,...]
     qk_interleaved=False,
     num_chunks=1,  # if num_chunks > 1, interleaved pipeline scheduler is used.
+    tie_embeddings_and_output_weights=True,
     moe_type="Dropless",  # Support: "GShard", "MegaBlock", "MegaBlock-D", "Dropless"
-    num_experts=16,
+    num_experts=8,
     top_k=2,
     moe_layer_kwargs=dict(
         moe_grouped_mlp=False,
+        token_dispatch_policy="allgather",
     ),
 )
 """
@@ -189,10 +198,10 @@ weight parallel (dict):
 """
 parallel = dict(
     zero1=dict(size=-1, fsdp=False),
-    tensor=dict(size=16, mode="mtp"),
-    pipeline=dict(size=16, interleaved_overlap=True),
+    tensor=dict(size=1, mode="mtp"),
+    pipeline=dict(size=1, interleaved_overlap=True),
     weight=dict(size=1, overlap=True, memory_pool=True),
-    expert=dict(size=16, no_tp=True),
+    expert=dict(size=4, no_tp=False),
     expert_weight=dict(size=1, overlap=True, memory_pool=True),
 )
 
@@ -221,7 +230,7 @@ monitor = dict(
 #    #parallel_mode="tensor", # only used in MegaBlock-D(dmoe), parallel_mode can be tensor or weight
 # )
 
-model_type = "INTERNLM_MoE"
+model_type = "GPT256B"
 
 # metric_dtype can be "fp32" or other string
 # only when set to "fp32" will use fp32 to calc in metrics
