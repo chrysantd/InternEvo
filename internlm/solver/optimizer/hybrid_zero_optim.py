@@ -49,6 +49,7 @@ from internlm.utils.timeout import llm_timeout
 
 from .base_optimizer import BaseOptimizer
 from .utils import compute_norm
+from internlm.utils.zeropp_manager import ZeroppManager
 
 inf = math.inf
 logger = get_logger(__file__)

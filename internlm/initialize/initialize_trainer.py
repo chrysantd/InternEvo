@@ -128,7 +128,7 @@ def initialize_trainer(
                     else None
                 )
                 scheduler = ZeroPPScheduler(
-                    data_process_func=data_fn,
+                    data_process_func=_data_preparation_func,
                     num_microbatches=gpc.config.NUM_MICRO_BATCHES,
                     num_chunks=gpc.config.model.num_chunks,
                     dtype=gpc.config.model["dtype"],
@@ -140,7 +140,7 @@ def initialize_trainer(
                 )
             else:
                 scheduler = InterleavedPipelineScheduler(
-                    data_process_func=data_fn,
+                    data_process_func=_data_preparation_func,
                     num_microbatches=gpc.config.NUM_MICRO_BATCHES,
                     num_chunks=gpc.config.model.num_chunks,
                     dtype=gpc.config.model["dtype"],

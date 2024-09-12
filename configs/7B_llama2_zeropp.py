@@ -47,7 +47,7 @@ data = dict(
     unit_schedule_size=4,
     seq_len=SEQ_LEN,
     # micro_num means the number of micro_batch contained in one gradient update
-    micro_num=4,
+    micro_num=8,
     # packed_length = micro_bsz * SEQ_LEN
     micro_bsz=1,
     # defaults to the value of micro_num
@@ -92,7 +92,7 @@ grad_scaler = dict(
 
 hybrid_zero_optimizer = dict(
     # Enable low_level_optimzer overlap_communication
-    overlap_sync_grad=True,
+    overlap_sync_grad=False,
     overlap_sync_param=False,
     # bucket size for nccl communication params
     reduce_bucket_size=512 * 1024 * 1024,
@@ -130,7 +130,7 @@ beta2_scheduler = dict(
 use_fp32_norm = False
 model = dict(
     checkpoint=False,
-    num_chunks=1,
+    num_chunks=4,
     num_attention_heads=NUM_ATTENTION_HEAD,
     embed_split_hidden=True,
     vocab_size=VOCAB_SIZE,
@@ -185,7 +185,7 @@ parallel = dict(
     zero1=dict(size=-1),
     tensor=dict(size=1, mode="isp"),
     pipeline=dict(size=4, interleaved_overlap=True, use_zeropp=True, decouple_grad=True),
-    weight=dict(size=1, overlap=True, memory_pool=True),
+    weight=dict(size=2, overlap=True, memory_pool=True),
 )
 
 cudnn_deterministic = False

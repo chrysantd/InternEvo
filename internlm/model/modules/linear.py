@@ -20,6 +20,7 @@ from internlm.core.parallel.shard import (
 )
 from internlm.model.ops.linear import linear_backward_op, linear_forward_op
 from internlm.utils.logger import get_logger
+from internlm.utils.zeropp_manager import ZeroppManager
 
 if TYPE_CHECKING:
     from internlm.core.parallel.comm.isp import WPCommunicator
