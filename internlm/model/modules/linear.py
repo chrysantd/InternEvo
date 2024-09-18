@@ -175,6 +175,7 @@ class WPFusedDenseFunc(torch.autograd.Function):
         module: nn.Module,
         communicator: WPCommunicator,
         return_residual=False,
+        is_head=False,
     ):
         ctx.compute_weight_gradient = weight.requires_grad
         ctx.return_residual = return_residual
@@ -185,7 +186,7 @@ class WPFusedDenseFunc(torch.autograd.Function):
             x = x.to(dtype=torch.get_autocast_gpu_dtype())
         x = x.contiguous()
 
-        use_zeropp = hasattr(gpc.config.parallel.pipeline, "use_zeropp") and gpc.config.parallel.pipeline.use_zeropp
+        use_zeropp = hasattr(gpc.config.parallel.pipeline, "use_zeropp") and gpc.config.parallel.pipeline.use_zeropp and not is_head
         if use_zeropp:
             total_weight = ZeroppManager.retrieve_full_wp_parameters(module.weight)
             if total_weight is None:
@@ -230,6 +231,7 @@ class WPFusedDenseFunc(torch.autograd.Function):
 
         saved_x = None if ctx.compute_weight_gradient is False else x
         ctx.save_for_backward(saved_x, weight)
+        ctx.is_head=is_head
 
         return output if not return_residual else (output, x)
 
@@ -254,7 +256,7 @@ class WPFusedDenseFunc(torch.autograd.Function):
         batch_dim = batch_shape.numel()
         grad_output = grad_output.reshape(batch_dim, grad_output.shape[-1])
 
-        use_zeropp = hasattr(gpc.config.parallel.pipeline, "use_zeropp") and gpc.config.parallel.pipeline.use_zeropp
+        use_zeropp = hasattr(gpc.config.parallel.pipeline, "use_zeropp") and gpc.config.parallel.pipeline.use_zeropp and not ctx.is_head
         if use_zeropp:
             total_weight = ZeroppManager.retrieve_full_wp_parameters(module.weight)
             if total_weight is None:
@@ -319,6 +321,7 @@ def fused_dense_func(
     module: Optional[nn.Module] = None,
     bias: Optional[torch.Tensor] = None,
     return_residual: bool = False,
+    is_head: bool = False,
 ):
     if communicator.communication_mode() == "wp":
         return WPFusedDenseFunc.apply(
@@ -328,6 +331,7 @@ def fused_dense_func(
             module,
             communicator,
             return_residual,
+            is_head,
         )
     else:  # mtp, msp, and fsp
         return SPFusedDenseFunc.apply(
@@ -562,6 +566,7 @@ class ScaleColumnParallelLinear(ParallelLinearWithCommExt):
             communicator=self._communicator,
             module=self,
             bias=self.bias,
+            is_head=True
         )
 
 
